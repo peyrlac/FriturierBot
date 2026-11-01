@@ -157,6 +157,7 @@ module.exports = async (client) => {
                                     calendarMessageId: calendarFile?.messageId || null,
                                     calendarFileName: calendarFile?.fileName || null,
                                     calendarAttachmentUrl: calendarFile?.url || null,
+                                    calendarAnnouncementMigrated: true,
                                     scheduledStartTimestamp: event.scheduledStartTimestamp,
                                     sentReminders: initialReminders
                                 } 
@@ -340,7 +341,8 @@ module.exports = async (client) => {
                         'EventThreads.$.eventName': newEvent.name,
                         'EventThreads.$.calendarMessageId': calendarFile?.messageId || eventThread.calendarMessageId || null,
                         'EventThreads.$.calendarFileName': calendarFile?.fileName || eventThread.calendarFileName || null,
-                        'EventThreads.$.calendarAttachmentUrl': calendarFile?.url || eventThread.calendarAttachmentUrl || null
+                        'EventThreads.$.calendarAttachmentUrl': calendarFile?.url || eventThread.calendarAttachmentUrl || null,
+                        'EventThreads.$.calendarAnnouncementMigrated': true
                     };
 
                     // Si la date a changé, mettre à jour le timestamp et réinitialiser les rappels

@@ -121,6 +121,7 @@ async function syncEventMessage(client, context) {
         'EventThreads.$.calendarMessageId': calendarFile.messageId,
         'EventThreads.$.calendarFileName': calendarFile.fileName,
         'EventThreads.$.calendarAttachmentUrl': calendarFile.url,
+        'EventThreads.$.calendarAnnouncementMigrated': true,
         'EventThreads.$.scheduledStartTimestamp': event.scheduledStartTimestamp
     };
 

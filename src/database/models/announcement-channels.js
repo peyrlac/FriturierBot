@@ -26,6 +26,7 @@ const EventThreadSchema = new mongoose.Schema({
     calendarMessageId: { type: String },
     calendarFileName: { type: String },
     calendarAttachmentUrl: { type: String },
+    calendarAnnouncementMigrated: { type: Boolean, default: false },
     emojiOverride: { type: String },
     scheduledStartTimestamp: { type: Number, required: true },
     sentReminders: { type: ReminderSchema, required: true, default: () => ({}) },
@@ -273,9 +274,13 @@ async function clearOldEventsFromDatabase(client) {
                             eventThread.calendarAttachmentUrl = null;
                             hasUpdates = true;
                         }
+                        if (eventThread.calendarAnnouncementMigrated === undefined) {
+                            eventThread.calendarAnnouncementMigrated = false;
+                            hasUpdates = true;
+                        }
 
                         // Si l'événement est ancien ou n'a pas encore de fichier calendrier, le resynchroniser
-                        if (!eventThread.version || eventThread.version === 1 || !eventThread.calendarAttachmentUrl) {
+                        if (!eventThread.version || eventThread.version === 1 || !eventThread.calendarAttachmentUrl || !eventThread.calendarAnnouncementMigrated) {
                             try {
                                 const discordEvent = await discordGuild.scheduledEvents.fetch(eventThread.eventId);
                                 if (discordEvent) {
@@ -372,6 +377,8 @@ async function clearOldEventsFromDatabase(client) {
                                                     }
                                                 }
                                             await followupMessage.edit({ content: "", embeds: [embed], components: [calendarButton] });
+                                            eventThread.calendarAnnouncementMigrated = true;
+                                            hasUpdates = true;
                                             console.log(chalk.green(`Updated followupMessage for ${eventThread.eventName}`));
                                         }
                                     }
@@ -385,7 +392,7 @@ async function clearOldEventsFromDatabase(client) {
                             }
                         }
 
-                        if (eventThread.version !== 3) {
+                        if (eventThread.calendarAnnouncementMigrated && eventThread.version !== 3) {
                             eventThread.version = 3;
                             hasUpdates = true;
                         }
