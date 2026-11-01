@@ -292,12 +292,6 @@ module.exports = async (client) => {
                     let calendarFile = null;
                     try {
                         calendarFile = await uploadCalendarFile(client, newEvent);
-                        if (eventThread.calendarMessageId) {
-                            const oldCalendarMessage = await client.channels.fetch(process.env.UPLOAD_CHANNEL_ID)
-                                .then(channel => channel.messages.fetch(eventThread.calendarMessageId))
-                                .catch(() => null);
-                            await oldCalendarMessage?.delete().catch(() => null);
-                        }
                     } catch (error) {
                         console.error(`Failed to archive updated calendar file for event ${newEvent.id}:`, error);
                     }
@@ -368,11 +362,17 @@ module.exports = async (client) => {
                     await AnnouncementChannels.updateOne(
                         { 
                             Guild: newEvent.guildId,
-                            'EventThreads.eventId': newEvent.id,
-                            'EventThreads.eventName': newEvent.name
+                            'EventThreads.eventId': newEvent.id
                         },
                         { $set: updates }
                     );
+
+                    if (calendarFile?.messageId && eventThread.calendarMessageId && eventThread.calendarMessageId !== calendarFile.messageId) {
+                        const oldCalendarMessage = await client.channels.fetch(process.env.UPLOAD_CHANNEL_ID)
+                            .then(channel => channel.messages.fetch(eventThread.calendarMessageId))
+                            .catch(() => null);
+                        await oldCalendarMessage?.delete().catch(() => null);
+                    }
 
                 } catch (error) {
                     console.error(`Error updating description message for event ${newEvent.name}:`, error);

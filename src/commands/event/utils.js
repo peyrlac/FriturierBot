@@ -1,6 +1,9 @@
 const Discord = require('discord.js');
 const { model: AnnouncementChannels, getActivityEmoji } = require('../../database/models/announcement-channels');
 const { generateCalendarLinks, generateCalendarFile } = require('../../assets/utils/calendar');
+const { createManager } = require('../../handlers/functions/eventReminders');
+
+const reminderManager = createManager();
 
 async function getEventContext(client, interaction) {
     if (!interaction.channel?.isThread()) return null;
@@ -88,6 +91,7 @@ function buildCalendarRow(event, calendarFile) {
 
 async function syncEventMessage(client, context) {
     const { event, eventThread, thread } = context;
+    const startTimeChanged = eventThread.scheduledStartTimestamp !== event.scheduledStartTimestamp;
     const message = await thread.messages.fetch(eventThread.followupMessageId);
     const creator = await getEventCreator(client, event);
     const embed = new Discord.EmbedBuilder()
@@ -118,15 +122,21 @@ async function syncEventMessage(client, context) {
     const emoji = eventThread.emojiOverride || getActivityEmoji(`${event.name} ${event.description || ''}`);
     await thread.setName(`${emoji}・${event.name}`).catch(() => null);
 
+    const updates = {
+        'EventThreads.$.eventName': event.name,
+        'EventThreads.$.calendarMessageId': calendarFile.messageId,
+        'EventThreads.$.calendarFileName': calendarFile.fileName,
+        'EventThreads.$.calendarAttachmentUrl': calendarFile.url,
+        'EventThreads.$.scheduledStartTimestamp': event.scheduledStartTimestamp
+    };
+
+    if (startTimeChanged) {
+        updates['EventThreads.$.sentReminders'] = reminderManager.initializeReminderState(event.scheduledStartTimestamp);
+    }
+
     await AnnouncementChannels.updateOne(
         { Guild: event.guildId, 'EventThreads.threadId': thread.id },
-        { $set: {
-            'EventThreads.$.eventName': event.name,
-            'EventThreads.$.calendarMessageId': calendarFile.messageId,
-            'EventThreads.$.calendarFileName': calendarFile.fileName,
-            'EventThreads.$.calendarAttachmentUrl': calendarFile.url,
-            'EventThreads.$.scheduledStartTimestamp': event.scheduledStartTimestamp
-        } }
+        { $set: updates }
     );
 
     return { calendarFile };
