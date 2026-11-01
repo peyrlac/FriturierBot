@@ -27,6 +27,7 @@ const EventThreadSchema = new mongoose.Schema({
     calendarFileName: { type: String },
     calendarAttachmentUrl: { type: String },
     calendarAnnouncementMigrated: { type: Boolean, default: false },
+    calendarReplacementPending: { type: Boolean, default: false },
     emojiOverride: { type: String },
     scheduledStartTimestamp: { type: Number, required: true },
     sentReminders: { type: ReminderSchema, required: true, default: () => ({}) },
@@ -278,12 +279,22 @@ async function clearOldEventsFromDatabase(client) {
                             eventThread.calendarAnnouncementMigrated = false;
                             hasUpdates = true;
                         }
+                        if (eventThread.calendarReplacementPending === undefined) {
+                            eventThread.calendarReplacementPending = false;
+                            hasUpdates = true;
+                        }
 
                         // Si l'événement est ancien ou n'a pas encore de fichier calendrier, le resynchroniser
-                        if (!eventThread.version || eventThread.version === 1 || !eventThread.calendarAttachmentUrl || !eventThread.calendarAnnouncementMigrated) {
+                        if (!eventThread.version || eventThread.version === 1 || !eventThread.calendarAttachmentUrl || !eventThread.calendarAnnouncementMigrated || eventThread.calendarReplacementPending) {
                             try {
                                 const discordEvent = await discordGuild.scheduledEvents.fetch(eventThread.eventId);
                                 if (discordEvent) {
+                                    if (eventThread.scheduledStartTimestamp !== discordEvent.scheduledStartTimestamp) {
+                                        eventThread.scheduledStartTimestamp = discordEvent.scheduledStartTimestamp;
+                                        eventThread.sentReminders = initializeRemindersForTimestamp(discordEvent.scheduledStartTimestamp);
+                                        hasUpdates = true;
+                                    }
+
                                     // 1. Mettre à jour la description dans Discord
                                     //const newDescription = (discordEvent.description || "") + ".";
                                     //await discordEvent.edit({ description: newDescription });
@@ -303,7 +314,7 @@ async function clearOldEventsFromDatabase(client) {
                                                 endDate: new Date(end).toISOString()
                                             });
                                              let calendarAttachmentUrl = eventThread.calendarAttachmentUrl;
-                                             if (!calendarAttachmentUrl && UPLOAD_CHANNEL_ID) {
+                                             if ((!calendarAttachmentUrl || eventThread.calendarReplacementPending) && UPLOAD_CHANNEL_ID) {
                                                  const archiveChannel = await client.channels.fetch(UPLOAD_CHANNEL_ID).catch(() => null);
                                                  if (archiveChannel?.isTextBased()) {
                                                      const calendarFile = generateCalendarFile({
@@ -378,6 +389,7 @@ async function clearOldEventsFromDatabase(client) {
                                                 }
                                             await followupMessage.edit({ content: "", embeds: [embed], components: [calendarButton] });
                                             eventThread.calendarAnnouncementMigrated = true;
+                                            eventThread.calendarReplacementPending = false;
                                             hasUpdates = true;
                                             console.log(chalk.green(`Updated followupMessage for ${eventThread.eventName}`));
                                         }

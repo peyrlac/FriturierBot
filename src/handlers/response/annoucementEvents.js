@@ -158,6 +158,7 @@ module.exports = async (client) => {
                                     calendarFileName: calendarFile?.fileName || null,
                                     calendarAttachmentUrl: calendarFile?.url || null,
                                     calendarAnnouncementMigrated: true,
+                                    calendarReplacementPending: false,
                                     scheduledStartTimestamp: event.scheduledStartTimestamp,
                                     sentReminders: initialReminders
                                 } 
@@ -295,6 +296,14 @@ module.exports = async (client) => {
                         calendarFile = await uploadCalendarFile(client, newEvent);
                     } catch (error) {
                         console.error(`Failed to archive updated calendar file for event ${newEvent.id}:`, error);
+                        await AnnouncementChannels.updateOne(
+                            { Guild: newEvent.guildId, 'EventThreads.eventId': newEvent.id },
+                            { $set: {
+                                'EventThreads.$.calendarAnnouncementMigrated': false,
+                                'EventThreads.$.calendarReplacementPending': true
+                            } }
+                        );
+                        return;
                     }
 
                     const calendarButton = new Discord.ActionRowBuilder()
@@ -342,7 +351,8 @@ module.exports = async (client) => {
                         'EventThreads.$.calendarMessageId': calendarFile?.messageId || eventThread.calendarMessageId || null,
                         'EventThreads.$.calendarFileName': calendarFile?.fileName || eventThread.calendarFileName || null,
                         'EventThreads.$.calendarAttachmentUrl': calendarFile?.url || eventThread.calendarAttachmentUrl || null,
-                        'EventThreads.$.calendarAnnouncementMigrated': true
+                        'EventThreads.$.calendarAnnouncementMigrated': true,
+                        'EventThreads.$.calendarReplacementPending': false
                     };
 
                     // Si la date a changé, mettre à jour le timestamp et réinitialiser les rappels
