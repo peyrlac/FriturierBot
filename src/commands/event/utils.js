@@ -105,12 +105,6 @@ async function syncEventMessage(client, context) {
         });
 
     const calendarFile = await uploadCalendarFile(client, event);
-    if (eventThread.calendarMessageId) {
-        const oldMessage = await client.channels.fetch(process.env.UPLOAD_CHANNEL_ID)
-            .then(channel => channel.messages.fetch(eventThread.calendarMessageId))
-            .catch(() => null);
-        await oldMessage?.delete().catch(() => null);
-    }
 
     await message.edit({
         content: '',
@@ -138,6 +132,13 @@ async function syncEventMessage(client, context) {
         { Guild: event.guildId, 'EventThreads.threadId': thread.id },
         { $set: updates }
     );
+
+    if (eventThread.calendarMessageId && calendarFile.messageId && eventThread.calendarMessageId !== calendarFile.messageId) {
+        const oldMessage = await client.channels.fetch(process.env.UPLOAD_CHANNEL_ID)
+            .then(channel => channel.messages.fetch(eventThread.calendarMessageId))
+            .catch(() => null);
+        await oldMessage?.delete().catch(() => null);
+    }
 
     return { calendarFile };
 }

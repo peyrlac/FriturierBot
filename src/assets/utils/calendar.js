@@ -48,7 +48,7 @@ function generateCalendarLinks({ title, description, location, startDate, endDat
     const encodeParam = (value) => encodeURIComponent(value?.toString() || '');
     const formatOutlookDate = (input) => safeDate(input)
         .toISOString()
-        .replace(/\.\d{3}Z$/, '');
+        .replace(/\.\d{3}Z$/, 'Z');
     const outlookStart = encodeParam(formatOutlookDate(startDate));
     const outlookEnd = encodeParam(formatOutlookDate(endDate));
     const values = { title: title || '', description: description || '', location: location || '' };
