@@ -6,7 +6,7 @@ function fitCalendarUrl(buildUrl, values) {
     for (const field of ['description', 'location', 'title']) {
         if (buildUrl(fitted).length <= MAX_DISCORD_BUTTON_URL_LENGTH) break;
 
-        const original = String(fitted[field] || '');
+        const original = Array.from(String(fitted[field] || ''));
         let low = 0;
         let high = original.length;
         let best = '';
@@ -14,7 +14,7 @@ function fitCalendarUrl(buildUrl, values) {
         while (low <= high) {
             const middle = Math.floor((low + high) / 2);
             const suffix = middle < original.length ? '…' : '';
-            const candidate = { ...fitted, [field]: original.slice(0, middle) + suffix };
+            const candidate = { ...fitted, [field]: original.slice(0, middle).join('') + suffix };
 
             if (buildUrl(candidate).length <= MAX_DISCORD_BUTTON_URL_LENGTH) {
                 best = candidate[field];
