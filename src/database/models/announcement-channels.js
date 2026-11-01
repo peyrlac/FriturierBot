@@ -1,7 +1,8 @@
 const mongoose = require('mongoose');
 const { Client, Events, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
-const { generateCalendarLinks } = require('../../assets/utils/calendar');
+const { generateCalendarLinks, generateCalendarFile } = require('../../assets/utils/calendar');
 const chalk = require('chalk');
+const UPLOAD_CHANNEL_ID = process.env.UPLOAD_CHANNEL_ID;
 const logger = require('../../handlers/logger');
 
 // Définir le sous-schéma pour un rappel individuel
@@ -22,6 +23,12 @@ const EventThreadSchema = new mongoose.Schema({
     eventId: { type: String, required: true },
     threadId: { type: String, required: true },
     followupMessageId: { type: String },  // ID du message de description
+    calendarMessageId: { type: String },
+    calendarFileName: { type: String },
+    calendarAttachmentUrl: { type: String },
+    calendarAnnouncementMigrated: { type: Boolean, default: false },
+    calendarReplacementPending: { type: Boolean, default: false },
+    emojiOverride: { type: String },
     scheduledStartTimestamp: { type: Number, required: true },
     sentReminders: { type: ReminderSchema, required: true, default: () => ({}) },
     version: { type: Number, default: 2 }
@@ -79,25 +86,35 @@ function initializeRemindersForTimestamp(timestamp) {
 
 function getActivityEmoji(text) {
     const searchText = text.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replaceAll("'", "").toLowerCase();
+    const collapsedText = searchText.replace(/(.)\1+/g, '$1');
+    const singularText = searchText.replace(/\b([a-z]+)(s|x)\b/g, '$1');
+    const collapsedSingularText = collapsedText.replace(/\b([a-z]+)(s|x)\b/g, '$1');
+    const searchVariants = [
+        searchText,
+        collapsedText,
+        singularText,
+        collapsedSingularText
+    ];
     const themes = [
         { emoji: '⭐', regex: /\b(cugnon)\b/i},
-        { emoji: '🎵', regex: /\b(musique|concert|festival|ardentes|playlist|écoute|album|chanson|chanteur)\b/i},
+        { emoji: '🕯️', regex: /\b(hommage)\b/i},
+        { emoji: '🎵', regex: /\b(musique|concert|festival|ardentes|playlist|ecoute|album|chanson|chanteur|clubber|club|cluber|notes)\b/i},
         { emoji: '🎪', regex: /\b(japan day|made in asia|comic con|comic-con|cosplay)\b/i},
         { emoji: '🌊', regex: /\b(aqualibi|aqualand|piscine|aquaparc|plage)\b/i},
         { emoji: '🎢', regex: /\b(parc|asterix|walibi|disney|attraction|attractions|rollercoaster)\b/i},
         { emoji: '🎳', regex: /\b(bowling|escape|quizz|vr|activite)\b/i},
-        { emoji: '🎬', regex: /\b(cinema|film|stream|twitch|netflix|film|vidéo|youtube)\b/i},
-        { emoji: '🎨', regex: /\b(experience|theatre|peinture|art|musee|nuit blanche|nuit de l art)\b/i},
-        { emoji: '🎮', regex: /\b(pokemon|tournoi|game|gaming|jeux vidéo|ps5|switch|xbox|jouer)\b/i},
+        { emoji: '🎬', regex: /\b(cinema|film|stream|twitch|netflix|film|video|youtube|animation)\b/i},
+        { emoji: '🎨', regex: /\b(experience|theatre|peinture|art|musee|nuit blanche|nuit de l art|musees|expos|expo)\b/i},
+        { emoji: '🎮', regex: /\b(pokemon|tournoi|game|gaming|jeux video|ps5|switch|xbox|jouer)\b/i},
         { emoji: '🍣', regex: /\b(hosaku|sushi|yayami|japonais|coreen)\b/i},
         { emoji: '🍔', regex: /\b(huggy|huggys|bk|burger king|burger|burgers|frites|frite)\b/i},
         { emoji: '🍜', regex: /\b(resto|restau|restaurant|buffet|cuisine|manger|recette|repas|nourriture)\b/i},
-        { emoji: '🎉', regex: /\b(soiree|anniversaire|annif|anniv|teuf|fête)\b/i},
+        { emoji: '🎉', regex: /\b(soiree|anniversaire|annif|anniv|teuf|fete)\b/i},
         { emoji: '🍻', regex: /\b(boite|sortie|verre|bar|zodiak)\b/i},
     ];
 
     for (const theme of themes) {
-        if (theme.regex.test(searchText)) {
+        if (searchVariants.some(variant => theme.regex.test(variant))) {
             return theme.emoji; // ou return theme pour plus de détails
         }
     }
@@ -222,11 +239,62 @@ async function clearOldEventsFromDatabase(client) {
                             continue;
                         }
 
-                        // Si l'événement n'a pas de version ou est en version 1, on met à jour sa description
-                        if (!eventThread.version || eventThread.version === 1) {
+                        // Migration idempotente du schéma des événements
+                        const legacyReminders = eventThread.sentReminders || {};
+                        const reminderState = {};
+                        for (const reminderType of ['month', 'week', 'day']) {
+                            const value = legacyReminders[reminderType];
+                            reminderState[reminderType] = typeof value === 'object'
+                                ? {
+                                    sent: value.sent === true,
+                                    timestamp: value.timestamp || null
+                                }
+                                : {
+                                    sent: value === true,
+                                    timestamp: null
+                                };
+                        }
+
+                        if (JSON.stringify(eventThread.sentReminders || {}) !== JSON.stringify(reminderState)) {
+                            eventThread.sentReminders = reminderState;
+                            hasUpdates = true;
+                        }
+                        if (eventThread.emojiOverride === undefined) {
+                            eventThread.emojiOverride = null;
+                            hasUpdates = true;
+                        }
+                        if (eventThread.calendarMessageId === undefined) {
+                            eventThread.calendarMessageId = null;
+                            hasUpdates = true;
+                        }
+                        if (eventThread.calendarFileName === undefined) {
+                            eventThread.calendarFileName = null;
+                            hasUpdates = true;
+                        }
+                        if (eventThread.calendarAttachmentUrl === undefined) {
+                            eventThread.calendarAttachmentUrl = null;
+                            hasUpdates = true;
+                        }
+                        if (eventThread.calendarAnnouncementMigrated === undefined) {
+                            eventThread.calendarAnnouncementMigrated = false;
+                            hasUpdates = true;
+                        }
+                        if (eventThread.calendarReplacementPending === undefined) {
+                            eventThread.calendarReplacementPending = false;
+                            hasUpdates = true;
+                        }
+
+                        // Si l'événement est ancien ou n'a pas encore de fichier calendrier, le resynchroniser
+                        if (!eventThread.version || eventThread.version === 1 || !eventThread.calendarAttachmentUrl || !eventThread.calendarAnnouncementMigrated || eventThread.calendarReplacementPending) {
                             try {
                                 const discordEvent = await discordGuild.scheduledEvents.fetch(eventThread.eventId);
                                 if (discordEvent) {
+                                    if (eventThread.scheduledStartTimestamp !== discordEvent.scheduledStartTimestamp) {
+                                        eventThread.scheduledStartTimestamp = discordEvent.scheduledStartTimestamp;
+                                        eventThread.sentReminders = initializeRemindersForTimestamp(discordEvent.scheduledStartTimestamp);
+                                        hasUpdates = true;
+                                    }
+
                                     // 1. Mettre à jour la description dans Discord
                                     //const newDescription = (discordEvent.description || "") + ".";
                                     //await discordEvent.edit({ description: newDescription });
@@ -245,19 +313,60 @@ async function clearOldEventsFromDatabase(client) {
                                                 startDate: new Date(start).toISOString(),
                                                 endDate: new Date(end).toISOString()
                                             });
+                                             let calendarAttachmentUrl = eventThread.calendarAttachmentUrl;
+                                             if ((!calendarAttachmentUrl || eventThread.calendarReplacementPending) && UPLOAD_CHANNEL_ID) {
+                                                 const archiveChannel = await client.channels.fetch(UPLOAD_CHANNEL_ID).catch(() => null);
+                                                 if (archiveChannel?.isTextBased()) {
+                                                     const calendarFile = generateCalendarFile({
+                                                         eventId: discordEvent.id,
+                                                         title: discordEvent.name,
+                                                         description: discordEvent.description,
+                                                         location: discordEvent.entityMetadata?.location || '',
+                                                         startDate: new Date(start).toISOString(),
+                                                         endDate: new Date(end).toISOString()
+                                                     });
+                                                     const archiveMessage = await archiveChannel.send({
+                                                         content: `Calendar file for event ${discordEvent.id}`,
+                                                         files: [{ attachment: calendarFile.content, name: calendarFile.fileName }]
+                                                     });
+                                                     calendarAttachmentUrl = archiveMessage.attachments.first()?.url || null;
+                                                     if (calendarAttachmentUrl) {
+                                                         eventThread.calendarMessageId = archiveMessage.id;
+                                                         eventThread.calendarFileName = calendarFile.fileName;
+                                                         eventThread.calendarAttachmentUrl = calendarAttachmentUrl;
+                                                         await AnnouncementChannels.updateOne(
+                                                             { Guild: guildData.Guild, 'EventThreads.eventId': discordEvent.id },
+                                                             { $set: {
+                                                                 'EventThreads.$.calendarMessageId': archiveMessage.id,
+                                                                 'EventThreads.$.calendarFileName': calendarFile.fileName,
+                                                                 'EventThreads.$.calendarAttachmentUrl': calendarAttachmentUrl
+                                                             } }
+                                                         );
+                                                     }
+                                                 }
+                                             }
                                             const calendarButton = new ActionRowBuilder()
                                             .addComponents(
                                                 new ButtonBuilder()
-                                                    .setLabel('Ajouter à Google agenda')
+                                                     .setLabel('Ajouter à Google Agenda')
                                                     .setStyle(ButtonStyle.Link)
                                                     .setURL(calendarLinks.google)
                                             )
                                             .addComponents(
                                                 new ButtonBuilder()
-                                                    .setLabel('Ajouter à Outlook')
+                                                     .setLabel('Ajouter à Outlook')
                                                     .setStyle(ButtonStyle.Link)
                                                     .setURL(calendarLinks.outlook)
                                             );
+                                             if (calendarAttachmentUrl) {
+                                                 calendarButton.addComponents(
+                                                     new ButtonBuilder()
+                                                         .setLabel("Télécharger l'ical")
+                                                         .setEmoji('📅')
+                                                         .setStyle(ButtonStyle.Link)
+                                                         .setURL(calendarAttachmentUrl)
+                                                 );
+                                             }
                                             const embed = new EmbedBuilder()
                                                 .setTitle("\`📌\`  Informations importantes")
                                                 .setDescription(discordEvent.description) // Utiliser la nouvelle description
@@ -279,17 +388,25 @@ async function clearOldEventsFromDatabase(client) {
                                                     }
                                                 }
                                             await followupMessage.edit({ content: "", embeds: [embed], components: [calendarButton] });
+                                            eventThread.calendarAnnouncementMigrated = true;
+                                            eventThread.calendarReplacementPending = false;
+                                            hasUpdates = true;
                                             console.log(chalk.green(`Updated followupMessage for ${eventThread.eventName}`));
                                         }
                                     }
                         
-                                    // 3. Mettre à jour la version
-                                    eventThread.version = 2;
+                                    // 3. Marquer la migration comme terminée
+                                    eventThread.version = 3;
                                     hasUpdates = true;
                                 }
                             } catch (error) {
                                 console.error(`Failed to update event ${eventThread.eventName}:`, error);
                             }
+                        }
+
+                        if (eventThread.calendarAnnouncementMigrated && eventThread.version !== 3) {
+                            eventThread.version = 3;
+                            hasUpdates = true;
                         }
 
                         // Garder l'événement dans la liste mise à jour

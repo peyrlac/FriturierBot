@@ -5,7 +5,10 @@ const Functions = require("../../database/models/functions");
 const VoiceSchema = require("../../database/models/voiceChannels");
 
 function resolveSubcommandPath(interaction) {
-    const command = interaction.commandName;
+    const commandPathAliases = {
+        evenement: 'event'
+    };
+    const command = commandPathAliases[interaction.commandName] || interaction.commandName;
     const group = typeof interaction.options?.getSubcommandGroup === 'function'
         ? interaction.options.getSubcommandGroup()
         : null;

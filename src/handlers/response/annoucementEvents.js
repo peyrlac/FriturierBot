@@ -2,7 +2,9 @@ const { Client, Events, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonSty
 const { model: AnnouncementChannels, getActivityEmoji } = require('../../database/models/announcement-channels');
 const { ReminderManager, createManager } = require('../functions/eventReminders');
 const { generateCalendarLinks } = require('../../assets/utils/calendar');
+const { getEventCreator, uploadCalendarFile } = require('../../commands/event/utils');
 const Discord = require('discord.js');
+const logger = require('../logger');
 const reminderManager = createManager();
 
 module.exports = async (client) => {
@@ -12,7 +14,7 @@ module.exports = async (client) => {
             try {
                 const data = await AnnouncementChannels.findOne({ Guild: event.guildId });
 
-                console.log(`Guild ID: ${event.guildId}`);
+                logger.info('EVENTS', `Création d'un événement | guild=${event.guildId} event=${event.id} name="${event.name}"`);
                 //console.log(`Database query result: ${JSON.stringify(data)}`);
 
                 if (!data) {
@@ -57,8 +59,8 @@ module.exports = async (client) => {
                         content: `<@${event.creatorId}> a créé un nouvel événement [${event.name}](${validURL}) !\n`
                     });
                     message.crosspost()
-                    .then(() => console.log('Crossposted message'))
-                    .catch(console.error);
+                    .then(() => logger.info('EVENTS', `Annonce crosspostée | event=${event.id}`))
+                    .catch(error => logger.warn('EVENTS', `Crosspost impossible | event=${event.id} reason="${error.message}"`));
                 } catch (error) {
                     console.error(`Failed to send message to channel ${data.Channel}: ${error.message}`);
                     return;
@@ -80,6 +82,7 @@ module.exports = async (client) => {
 
                     // Create and send the embed if there's a description
                     let followupMessageId = null;
+                    const creator = await getEventCreator(client, event);
                     //if (event.description) {
                         const embed = new EmbedBuilder()
                             .setTitle("\`📌\`  Informations importantes")
@@ -87,8 +90,8 @@ module.exports = async (client) => {
                             .setColor(0x0099FF)
                             .setTimestamp(new Date(event.scheduledStartTimestamp))
                             .setFooter({
-                                text: event.creator.globalName,
-                                iconURL: event.creator.avatarURL()
+                                text: creator?.globalName || creator?.username || 'Créateur inconnu',
+                                iconURL: creator?.avatarURL?.() || undefined
                             });
                         
                         const start = event.scheduledStartTimestamp;
@@ -100,10 +103,16 @@ module.exports = async (client) => {
                             startDate: new Date(start).toISOString(),
                             endDate: new Date(end).toISOString()
                         });
+                        let calendarFile = null;
+                        try {
+                            calendarFile = await uploadCalendarFile(client, event);
+                        } catch (error) {
+                            console.error(`Failed to archive calendar file for event ${event.id}:`, error);
+                        }
                         const calendarButton = new Discord.ActionRowBuilder()
                             .addComponents(
                                 new Discord.ButtonBuilder()
-                                    .setLabel('Ajouter à Google agenda')
+                                    .setLabel('Ajouter à Google Agenda')
                                     .setStyle(Discord.ButtonStyle.Link)
                                     .setURL(calendarLinks.google)
                             ).addComponents(
@@ -113,11 +122,22 @@ module.exports = async (client) => {
                                 .setURL(calendarLinks.outlook)
                             )
 
+                        if (calendarFile?.url) {
+                            calendarButton.addComponents(
+                                new Discord.ButtonBuilder()
+                                    .setLabel("Télécharger l'ical")
+                                    .setStyle(Discord.ButtonStyle.Link)
+                                    .setURL(calendarFile.url)
+                            );
+                        }
+
                         const followupMessage = await thread.send({ embeds: [embed], components: [calendarButton] });
                         followupMessageId = followupMessage.id;
                         // Pin le message de description
                         await followupMessage.pin().catch(error => {
-                            console.error('Erreur lors du pin du message:', error);
+                            const code = error.code || error.rawError?.code || 'UNKNOWN';
+                            const reason = error.rawError?.message || error.message || 'Erreur inconnue';
+                            logger.warn('EVENTS', `Épinglage impossible | event=${event.id} message=${followupMessage.id} code=${code} reason="${reason}"`);
                         });
                     //}
 
@@ -134,6 +154,11 @@ module.exports = async (client) => {
                                     eventId: event.id, 
                                     threadId: thread.id,
                                     followupMessageId: followupMessageId,
+                                    calendarMessageId: calendarFile?.messageId || null,
+                                    calendarFileName: calendarFile?.fileName || null,
+                                    calendarAttachmentUrl: calendarFile?.url || null,
+                                    calendarAnnouncementMigrated: true,
+                                    calendarReplacementPending: false,
                                     scheduledStartTimestamp: event.scheduledStartTimestamp,
                                     sentReminders: initialReminders
                                 } 
@@ -176,10 +201,18 @@ module.exports = async (client) => {
                                 name: '📌 Description en épinglés', 
                                 value: 'Modifie à tout moment la description pour garder les informations clés en épinglés' 
                             },
-                            { 
-                                name: '👁️‍🗨️ Créer des sondages', 
-                                value: 'Tu peux également créer des sondages et vérifier la liste des participants (\`/event participants\`)'
+                            {
+                                name: '🎨 Modifier l’emoji',
+                                value: 'Le créateur peut personnaliser l’emoji du thread avec `/event emoji emoji:🔥`'
                             },
+                             { 
+                                 name: '👁️‍🗨️ Créer des sondages', 
+                                 value: 'Tu peux également créer des sondages dans ce fil.'
+                             },
+                             {
+                                 name: '👥 Voir les participants',
+                                  value: 'Consulte la liste avec \`/event participants\`.'
+                             },
                             { 
                                 name: '⏰ Rappels automatiques', 
                                 value: reminderText
@@ -187,7 +220,7 @@ module.exports = async (client) => {
                         )
 
                     const welcomeMessage = await thread.send({
-                        content: `<@${event.creatorId}>, ce message se supprimera <t:${Math.floor((Date.now() + 60000) / 1000)}:R> <a:eliottSlide:974441004771967006>`,
+                        content: `<@${event.creatorId}>, ce message s\'auto-détruira <t:${Math.floor((Date.now() + 60000) / 1000)}:R> <a:eliottSlide:974441004771967006>`,
                         embeds: [welcomeEmbed],
                         allowedMentions: { parse: [] }
                     });
@@ -199,9 +232,9 @@ module.exports = async (client) => {
                         });
                     }, 60000);
 
-                    console.log(`Private thread created for event ${event.name} in guild ${event.guildId}`);
+                    logger.info('EVENTS', `Thread privé créé | guild=${event.guildId} event=${event.id} thread=${thread.id}`);
                 } catch (error) {
-                    console.error(`Failed to create private thread for event ${event.name}: ${error.message}`);
+                    logger.error('EVENTS', `Échec de création du thread | event=${event.id} name="${event.name}"`, error);
                 }
 
             } catch (error) {
@@ -236,14 +269,15 @@ module.exports = async (client) => {
                     }
 
                     // Créer le nouvel embed
+                    const creator = await getEventCreator(client, newEvent);
                     const embed = new EmbedBuilder()
                         .setTitle("\`📌\`  Informations importantes")
                         .setDescription(newEvent.description || "Pas de description fournie")
                         .setColor(0x0099FF)
                         .setTimestamp(new Date(newEvent.scheduledStartTimestamp))
                         .setFooter({
-                            text: newEvent.creator.globalName,
-                            iconURL: newEvent.creator.avatarURL()
+                            text: creator?.globalName || creator?.username || 'Créateur inconnu',
+                            iconURL: creator?.avatarURL?.() || undefined
                         });
 
                     // Générer les liens de calendrier
@@ -252,14 +286,37 @@ module.exports = async (client) => {
                     const calendarLinks = generateCalendarLinks({
                         title: newEvent.name,
                         description: newEvent.description,
+                        location: newEvent.entityMetadata?.location || oldEvent.entityMetadata?.location || '',
                         startDate: new Date(start).toISOString(),
                         endDate: new Date(end).toISOString()
                         });
 
+                    let calendarFile = null;
+                    try {
+                        calendarFile = await uploadCalendarFile(client, newEvent);
+                    } catch (error) {
+                        console.error(`Failed to archive updated calendar file for event ${newEvent.id}:`, error);
+                        const failedCalendarUpdates = {
+                            'EventThreads.$.calendarAnnouncementMigrated': false,
+                            'EventThreads.$.calendarReplacementPending': true
+                        };
+
+                        if (oldEvent.scheduledStartTimestamp !== newEvent.scheduledStartTimestamp) {
+                            failedCalendarUpdates['EventThreads.$.scheduledStartTimestamp'] = newEvent.scheduledStartTimestamp;
+                            failedCalendarUpdates['EventThreads.$.sentReminders'] = reminderManager.initializeReminderState(newEvent.scheduledStartTimestamp);
+                        }
+
+                        await AnnouncementChannels.updateOne(
+                            { Guild: newEvent.guildId, 'EventThreads.eventId': newEvent.id },
+                            { $set: failedCalendarUpdates }
+                        );
+                        return;
+                    }
+
                     const calendarButton = new Discord.ActionRowBuilder()
                         .addComponents(
                             new Discord.ButtonBuilder()
-                                .setLabel('Ajouter à Google agenda')
+                                .setLabel('Ajouter à Google Agenda')
                                 .setStyle(Discord.ButtonStyle.Link)
                                 .setURL(calendarLinks.google)
                         ).addComponents(
@@ -269,24 +326,40 @@ module.exports = async (client) => {
                             .setURL(calendarLinks.outlook)
                         );
 
+                    if (calendarFile?.url) {
+                        calendarButton.addComponents(
+                            new Discord.ButtonBuilder()
+                                .setLabel("Télécharger l'ical")
+                                .setStyle(Discord.ButtonStyle.Link)
+                                .setURL(calendarFile.url)
+                        );
+                    }
+
                     // Mettre à jour le message
                     await followupMessage.edit({ embeds: [embed], components: [calendarButton] });
                     // S'assurer que le message est toujours pin
                     if (!followupMessage.pinned) {
                         await followupMessage.pin().catch(error => {
-                            console.error('Erreur lors du pin du message:', error);
+                            const code = error.code || error.rawError?.code || 'UNKNOWN';
+                            const reason = error.rawError?.message || error.message || 'Erreur inconnue';
+                            logger.warn('EVENTS', `Épinglage impossible | event=${newEvent.id} message=${followupMessage.id} code=${code} reason="${reason}"`);
                         });
                     }
 
                     // Mettre à jour le nom du thread si nécessaire
                     if (oldEvent.name !== newEvent.name) {
-                        const eventEmoji = getActivityEmoji(`${newEvent.name} ${newEvent.description}`);
+                        const eventEmoji = eventThread.emojiOverride || getActivityEmoji(`${newEvent.name} ${newEvent.description}`);
                         await thread.setName(`${eventEmoji}・${newEvent.name}`);
                     }
 
                     // Préparer les mises à jour de la base de données
                     const updates = {
-                        'EventThreads.$.eventName': newEvent.name
+                        'EventThreads.$.eventName': newEvent.name,
+                        'EventThreads.$.calendarMessageId': calendarFile?.messageId || eventThread.calendarMessageId || null,
+                        'EventThreads.$.calendarFileName': calendarFile?.fileName || eventThread.calendarFileName || null,
+                        'EventThreads.$.calendarAttachmentUrl': calendarFile?.url || eventThread.calendarAttachmentUrl || null,
+                        'EventThreads.$.calendarAnnouncementMigrated': true,
+                        'EventThreads.$.calendarReplacementPending': false
                     };
 
                     // Si la date a changé, mettre à jour le timestamp et réinitialiser les rappels
@@ -308,11 +381,17 @@ module.exports = async (client) => {
                     await AnnouncementChannels.updateOne(
                         { 
                             Guild: newEvent.guildId,
-                            'EventThreads.eventId': newEvent.id,
-                            'EventThreads.eventName': newEvent.name
+                            'EventThreads.eventId': newEvent.id
                         },
                         { $set: updates }
                     );
+
+                    if (calendarFile?.messageId && eventThread.calendarMessageId && eventThread.calendarMessageId !== calendarFile.messageId) {
+                        const oldCalendarMessage = await client.channels.fetch(process.env.UPLOAD_CHANNEL_ID)
+                            .then(channel => channel.messages.fetch(eventThread.calendarMessageId))
+                            .catch(() => null);
+                        await oldCalendarMessage?.delete().catch(() => null);
+                    }
 
                 } catch (error) {
                     console.error(`Error updating description message for event ${newEvent.name}:`, error);
@@ -345,7 +424,7 @@ module.exports = async (client) => {
                         //console.log(`${user.username} was tagged in thread for event ${event.name}`);
                     }
                 } else {
-                    console.log(`No thread found for event ${event.name}`);
+                    logger.warn('EVENTS', `Thread introuvable | guild=${event.guildId} event=${event.id} name="${event.name}"`);
                 }
             } catch (error) {
                 console.error(`Error handling GuildScheduledEventUserAdd event: ${error.message}`);

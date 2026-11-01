@@ -22,6 +22,54 @@ module.exports = {
                         .setDescription(getCommandMetadata('commandMetadata.event.subcommands.participants.options.event_id.description'))
                         .setRequired(false)
                 )
+        )
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('info')
+                .setDescription('Afficher les informations et les liens calendrier de ton événement')
+        )
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('sync')
+                .setDescription('Synchroniser le message et les calendriers de ton événement')
+        )
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('reminders')
+                .setDescription('Gérer les rappels de ton événement')
+                .addStringOption(option =>
+                    option
+                        .setName('reminder')
+                        .setDescription('Rappel à gérer')
+                        .setRequired(true)
+                        .addChoices(
+                            { name: '1 mois avant', value: 'month' },
+                            { name: '1 semaine avant', value: 'week' },
+                            { name: '1 jour avant', value: 'day' }
+                        )
+                )
+                .addStringOption(option =>
+                    option
+                        .setName('action')
+                        .setDescription('Action à effectuer')
+                        .setRequired(true)
+                        .addChoices(
+                            { name: 'Activer', value: 'enable' },
+                            { name: 'Désactiver', value: 'disable' },
+                            { name: 'Réinitialiser', value: 'reset' }
+                        )
+                )
+        )
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('emoji')
+                .setDescription('Remplacer l’emoji du thread de ton événement (créateur uniquement)')
+                .addStringOption(option =>
+                    option
+                        .setName('emoji')
+                        .setDescription('Emoji ou emoji personnalisé à utiliser')
+                        .setRequired(true)
+                )
         ),
 
     /** 
@@ -33,7 +81,7 @@ module.exports = {
     localizationKey: 'commandMetadata.event',
 
     run: async (client, interaction, args) => {
-        await interaction.deferReply({ ephemeral: true });
-        client.loadSubcommands(client, interaction, args);
+        await interaction.deferReply({ flags: Discord.MessageFlags.Ephemeral });
+        return client.loadSubcommands(client, interaction, args);
     },
 };
