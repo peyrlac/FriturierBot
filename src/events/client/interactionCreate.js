@@ -81,7 +81,11 @@ module.exports = async (client, interaction) => {
         }
 
     const cmd = client.commands.get(interaction.commandName);
-    if (cmd && typeof client.requireFeature === 'function' && !(await client.requireFeature(interaction, cmd.data.name))) {
+    const featureKey = cmd?.featureKey
+      || (typeof cmd?.localizationKey === 'string' && cmd.localizationKey.startsWith('commandMetadata.')
+        ? cmd.localizationKey.slice('commandMetadata.'.length)
+        : cmd?.data?.name);
+    if (cmd && typeof client.requireFeature === 'function' && !(await client.requireFeature(interaction, featureKey))) {
       return;
     }
                 if (!cmd){

@@ -91,6 +91,7 @@ function createFeatureManager({
 
     return {
         registry: definitions,
+        hasFeature: feature => typeof feature === 'string' && hasOwn(definitions, feature),
         getAvailableFeatures: () => Object.values(definitions),
         getFeatureDefinition: feature => definitionFor(feature),
         getFeatureState,
@@ -132,6 +133,14 @@ function installFeatureManager(client, options) {
     client.isFeatureEnabled = manager.isFeatureEnabled;
     client.getFeatureState = manager.getFeatureState;
     client.requireFeature = async (interaction, feature) => {
+        // Commands and context menus are not necessarily backed by a feature
+        // entry (for example the "Mettre en spoiler" context menu). They must
+        // remain executable instead of passing their display name to
+        // definitionFor(), which would throw "Unknown feature".
+        if (!manager.hasFeature(feature)) {
+            return true;
+        }
+
         const state = await manager.getFeatureState(feature, interaction?.guild?.id);
         if (state.enabled) return true;
 
