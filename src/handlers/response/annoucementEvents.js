@@ -296,12 +296,19 @@ module.exports = async (client) => {
                         calendarFile = await uploadCalendarFile(client, newEvent);
                     } catch (error) {
                         console.error(`Failed to archive updated calendar file for event ${newEvent.id}:`, error);
+                        const failedCalendarUpdates = {
+                            'EventThreads.$.calendarAnnouncementMigrated': false,
+                            'EventThreads.$.calendarReplacementPending': true
+                        };
+
+                        if (oldEvent.scheduledStartTimestamp !== newEvent.scheduledStartTimestamp) {
+                            failedCalendarUpdates['EventThreads.$.scheduledStartTimestamp'] = newEvent.scheduledStartTimestamp;
+                            failedCalendarUpdates['EventThreads.$.sentReminders'] = reminderManager.initializeReminderState(newEvent.scheduledStartTimestamp);
+                        }
+
                         await AnnouncementChannels.updateOne(
                             { Guild: newEvent.guildId, 'EventThreads.eventId': newEvent.id },
-                            { $set: {
-                                'EventThreads.$.calendarAnnouncementMigrated': false,
-                                'EventThreads.$.calendarReplacementPending': true
-                            } }
+                            { $set: failedCalendarUpdates }
                         );
                         return;
                     }
