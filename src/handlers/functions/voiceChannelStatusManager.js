@@ -94,6 +94,12 @@ async function syncChannel(client, channelId, options = {}) {
         !(await client.isFeatureEnabled('voiceChannelStatus', channel.guild.id))) return null;
     if (options.type === 'reconcile' && !options.statusObserved &&
         !await observeCurrentVoiceStatus(client, channel)) return null;
+    const pendingState = await getState(channel.guild.id, channel.id);
+    if (pendingState.syncStatus === 'resetPending') {
+        const retryAt = pendingState.nextRetryAt && new Date(pendingState.nextRetryAt).getTime();
+        if (!retryAt || retryAt <= Date.now()) return forceReset(client, channel);
+        return pendingState;
+    }
     return withQueue(channelId, async () => {
         const config = await getEffectiveConfig(channel.guild.id, channel.parentId, channel.id);
         let state = await getState(channel.guild.id, channel.id);
@@ -198,7 +204,7 @@ async function observeCurrentVoiceStatus(client, channel) {
             manualValue: manuallyLocked ? actualStatus : null,
             manualObservedAt: manuallyLocked ? new Date() : state.manualObservedAt,
             source: manuallyLocked ? 'manual' : state.source,
-            syncStatus: 'idle',
+            syncStatus: state.syncStatus === 'resetPending' ? 'resetPending' : 'idle',
         });
     });
     return true;
@@ -360,7 +366,10 @@ async function forceReset(client, channel) {
             });
         } catch (error) {
             await updateState(state, {
-                syncStatus: 'error',
+                // Keep the requested reset as a durable operation. Ordinary
+                // synchronization must not consume it while the channel is
+                // still manually locked.
+                syncStatus: 'resetPending',
                 failureCount: (state.failureCount || 0) + 1,
                 nextRetryAt: new Date(Date.now() + Math.min(300000, 1000 * 2 ** Math.min(state.failureCount || 0, 8))),
                 writeLock: null,
@@ -429,7 +438,11 @@ async function observeVoiceStatus(client, channelOrPayload, statusValue) {
         if (recentWrite && recentWrite.expiresAt < Date.now()) recentWrites.delete(channel.id);
         const activeWrite = recentWrites.get(channel.id);
         const isRecentBotWrite = (activeWrite && activeWrite.value === status) || (state.lastBotValue === status && state.lastBotWriteAt && Date.now() - new Date(state.lastBotWriteAt).getTime() < 120000);
-        if (isRecentBotWrite) return updateState(state, { currentDiscordValue: status, lastObservedAt: new Date(), syncStatus: 'idle' });
+        if (isRecentBotWrite) return updateState(state, {
+            currentDiscordValue: status,
+            lastObservedAt: new Date(),
+            syncStatus: state.syncStatus === 'resetPending' ? 'resetPending' : 'idle',
+        });
         const manuallySet = channel.members.size > 0;
         const overlayWasChangedByHuman = state.welcomeOverlay?.active &&
             status !== state.welcomeOverlay.overlayValue;
@@ -452,7 +465,7 @@ async function observeVoiceStatus(client, channelOrPayload, statusValue) {
                     originalFingerprint: null,
                 },
             } : {}),
-            syncStatus: 'idle',
+            syncStatus: state.syncStatus === 'resetPending' ? 'resetPending' : 'idle',
         });
     });
     return observedState;
