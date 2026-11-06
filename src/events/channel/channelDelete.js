@@ -6,7 +6,16 @@ const voiceChannelStatusState = require('../../database/models/voiceChannelStatu
 
 module.exports = async (client, channel) => {
     await Promise.all([
-        voiceChannelStatusConfig.deleteMany({ guildId: channel.guild.id, $or: [{ channelId: channel.id }, { categoryId: channel.id }, { targetId: channel.id }] }),
+        voiceChannelStatusConfig.deleteMany({
+            guildId: channel.guild.id,
+            $or: [
+                // A category may only remove its own category-scoped setup.
+                // In particular, do not match a guild setup that merely kept
+                // the channel's parent category as metadata.
+                { scope: 'category', $or: [{ targetId: channel.id }, { categoryId: channel.id }] },
+                { scope: 'channel', $or: [{ targetId: channel.id }, { channelId: channel.id }] },
+            ],
+        }),
         voiceChannelStatusState.deleteOne({ guildId: channel.guild.id, channelId: channel.id }),
     ]).catch(() => null);
 

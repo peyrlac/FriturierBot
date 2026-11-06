@@ -92,6 +92,8 @@ async function syncChannel(client, channelId, options = {}) {
     if (!channel?.guild || channel.type !== Discord.ChannelType.GuildVoice) return null;
     if (typeof client.isFeatureEnabled === 'function' &&
         !(await client.isFeatureEnabled('voiceChannelStatus', channel.guild.id))) return null;
+    if (options.type === 'reconcile' && !options.statusObserved &&
+        !await observeCurrentVoiceStatus(client, channel)) return null;
     return withQueue(channelId, async () => {
         const config = await getEffectiveConfig(channel.guild.id, channel.parentId, channel.id);
         let state = await getState(channel.guild.id, channel.id);
@@ -141,6 +143,49 @@ async function syncChannel(client, channelId, options = {}) {
         }
         return state;
     });
+}
+
+async function readActualVoiceStatus(client, channel) {
+    if (client.rest?.get) {
+        try {
+            const payload = await client.rest.get(`/channels/${channel.id}`);
+            if (Object.prototype.hasOwnProperty.call(payload || {}, 'status')) return payload.status ?? null;
+            if (Object.prototype.hasOwnProperty.call(payload || {}, 'voice_status')) return payload.voice_status ?? null;
+        } catch (_) {
+            return undefined;
+        }
+    }
+    if (Object.prototype.hasOwnProperty.call(channel, 'status')) return channel.status ?? null;
+    return undefined;
+}
+
+async function observeCurrentVoiceStatus(client, channel) {
+    const actualStatus = await readActualVoiceStatus(client, channel);
+    if (actualStatus === undefined) return false;
+
+    await withQueue(channel.id, async () => {
+        const state = await getState(channel.guild.id, channel.id);
+        const hasPreviousObservation = Boolean(
+            state.lastObservedAt || state.currentDiscordValue !== null || state.manualLocked,
+        );
+        const matchesKnownBotValue = state.lastBotValue === actualStatus &&
+            state.currentDiscordValue === actualStatus &&
+            state.lastBotWriteAt;
+        const matchesActiveWelcome = state.welcomeOverlay?.active &&
+            state.currentDiscordValue === actualStatus;
+        const manuallyLocked = Boolean(state.manualLocked) ||
+            (!matchesKnownBotValue && !matchesActiveWelcome && channel.members.size > 0 && hasPreviousObservation);
+        await updateState(state, {
+            currentDiscordValue: actualStatus,
+            lastObservedAt: new Date(),
+            manualLocked: manuallyLocked,
+            manualValue: manuallyLocked ? actualStatus : null,
+            manualObservedAt: manuallyLocked ? new Date() : state.manualObservedAt,
+            source: manuallyLocked ? 'manual' : state.source,
+            syncStatus: 'idle',
+        });
+    });
+    return true;
 }
 
 function scheduleWelcomeRestore(client, channelId, operationId, expiresAt) {
@@ -357,20 +402,19 @@ async function observeVoiceStatus(client, channelOrPayload, statusValue) {
         const activeWrite = recentWrites.get(channel.id);
         const isRecentBotWrite = (activeWrite && activeWrite.value === status) || (state.lastBotValue === status && state.lastBotWriteAt && Date.now() - new Date(state.lastBotWriteAt).getTime() < 120000);
         if (isRecentBotWrite) return updateState(state, { currentDiscordValue: status, lastObservedAt: new Date(), syncStatus: 'idle' });
-        const manuallySet = Boolean(status);
+        const manuallySet = channel.members.size > 0;
         return updateState(state, {
             currentDiscordValue: status,
             lastObservedAt: new Date(),
-            manualLocked: manuallySet && channel.members.size > 0,
+            // A human clear is still a manual value. Keep the lock until an
+            // explicit reset, otherwise the next activity update recreates it.
+            manualLocked: manuallySet,
             manualValue: manuallySet ? status : null,
             manualObservedAt: manuallySet ? new Date() : null,
             source: manuallySet ? 'manual' : 'empty',
             syncStatus: 'idle',
         });
     });
-    if (!status && channel.members.size > 0) {
-        return syncChannel(client, channel.id, { type: 'manual-clear' });
-    }
     return observedState;
 }
 
@@ -382,6 +426,11 @@ async function reconcile(client) {
         for (const channel of guild.channels.cache.values()) {
             if (channel.type !== Discord.ChannelType.GuildVoice) continue;
             tasks.push((async () => {
+                const config = await getEffectiveConfig(guild.id, channel.parentId, channel.id);
+                if (!config.enabled) return;
+                // Reconciliation must never overwrite a status changed while
+                // the process was offline without first observing Discord.
+                if (!await observeCurrentVoiceStatus(client, channel)) return;
                 const state = await getState(guild.id, channel.id);
                 if (state.welcomeOverlay?.active) {
                     const expiresAt = state.welcomeOverlay.expiresAt && new Date(state.welcomeOverlay.expiresAt).getTime();
@@ -391,7 +440,7 @@ async function reconcile(client) {
                         scheduleWelcomeRestore(client, channel.id, state.welcomeOverlay.operationId, expiresAt);
                     }
                 }
-                await syncChannel(client, channel.id, { type: 'reconcile' });
+                await syncChannel(client, channel.id, { type: 'reconcile', statusObserved: true });
             })().catch(() => null));
         }
     }
