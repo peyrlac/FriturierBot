@@ -123,9 +123,9 @@ async function syncChannel(client, channelId, options = {}) {
     if (options.type === 'reconcile' && !options.statusObserved &&
         !await observeCurrentVoiceStatus(client, channel)) return null;
     const pendingState = await getState(channel.guild.id, channel.id);
-    if (pendingState.syncStatus === 'resetPending') {
+    if (pendingState.resetRequestPending || pendingState.syncStatus === 'resetPending') {
         const retryAt = pendingState.nextRetryAt && new Date(pendingState.nextRetryAt).getTime();
-        if (pendingState.emptySessionId) {
+        if (pendingState.emptySessionId && !pendingState.resetRequestPending) {
             if (channel.members.size > 0) {
                 // A member returned during the grace period: cancel only the
                 // empty-session reset, never a separately requested reset.
@@ -376,6 +376,7 @@ async function resetEmptyChannel(client, channel, config, state) {
             pendingCandidateSince: null,
             emptySessionId: null,
             emptyResetAt: null,
+            resetRequestPending: false,
             syncStatus: 'idle',
             writeLock: null,
             welcomeOverlay: { active: false },
@@ -413,7 +414,7 @@ async function runWelcome(client, channel, users, options = {}) {
         if (!channel.members.size || (automaticBatch && queuedUsers.length && !currentMembers.length)) return null;
         users = automaticBatch && currentMembers.length ? currentMembers : queuedUsers;
         const state = await getState(channel.guild.id, channel.id);
-        if (state.syncStatus === 'resetPending' && !state.emptySessionId) return state;
+        if (state.resetRequestPending || (state.syncStatus === 'resetPending' && !state.emptySessionId)) return state;
         const templates = (options.message ? [options.message] : config.welcomeOverlay.templates || []).filter(Boolean);
         if (!templates.length) return state;
         const template = templates[Math.floor(Math.random() * templates.length)];
@@ -429,7 +430,7 @@ async function runWelcome(client, channel, users, options = {}) {
         const lock = await acquireWriteLock(channel.guild.id, channel.id, 'welcome');
         if (!lock) return state;
         const lockedState = lock.state;
-        if (lockedState.syncStatus === 'resetPending' && !lockedState.emptySessionId) {
+        if (lockedState.resetRequestPending || (lockedState.syncStatus === 'resetPending' && !lockedState.emptySessionId)) {
             await updateState(lockedState, { writeLock: null });
             return lockedState;
         }
@@ -491,6 +492,7 @@ async function forceReset(client, channel) {
                 manualObservedAt: null,
                 emptySessionId: null,
                 emptyResetAt: null,
+                resetRequestPending: false,
                 lastActivityAt: null,
                 lastActivityFingerprint: null,
                 pendingCandidateActive: false,
@@ -513,6 +515,7 @@ async function forceReset(client, channel) {
                 // synchronization must not consume it while the channel is
                 // still manually locked.
                 syncStatus: 'resetPending',
+                resetRequestPending: true,
                 emptySessionId: null,
                 failureCount: (state.failureCount || 0) + 1,
                 nextRetryAt: new Date(Date.now() + Math.min(300000, 1000 * 2 ** Math.min(state.failureCount || 0, 8))),
@@ -532,7 +535,7 @@ async function restoreWelcome(client, channelId, expectedOperationId) {
         const lock = await acquireWriteLock(channel.guild.id, channel.id, 'welcome-restore');
         if (!lock) return getState(channel.guild.id, channel.id);
         const state = lock.state;
-        if (state.syncStatus === 'resetPending' && !state.emptySessionId) {
+        if (state.resetRequestPending || (state.syncStatus === 'resetPending' && !state.emptySessionId)) {
             resetDeferred = true;
             return updateState(state, { welcomeOverlay: { active: false }, writeLock: null });
         }

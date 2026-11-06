@@ -42,6 +42,7 @@ const Schema = new mongoose.Schema({
     pendingCandidateSince: { type: Date, default: null },
     emptySessionId: { type: String, default: null },
     emptyResetAt: { type: Date, default: null },
+    resetRequestPending: { type: Boolean, default: false },
     syncStatus: { type: String, enum: ['idle', 'pending', 'resetPending', 'error'], default: 'idle' },
     writeLock: { type: WriteLockSchema, default: null },
     welcomeOverlay: { type: OverlaySchema, default: () => ({}) },
