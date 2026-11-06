@@ -97,6 +97,16 @@ async function syncChannel(client, channelId, options = {}) {
     const pendingState = await getState(channel.guild.id, channel.id);
     if (pendingState.syncStatus === 'resetPending') {
         const retryAt = pendingState.nextRetryAt && new Date(pendingState.nextRetryAt).getTime();
+        if (pendingState.emptySessionId) {
+            if (channel.members.size > 0) {
+                // A member returned during the grace period: cancel only the
+                // empty-session reset, never a separately requested reset.
+                return updateState(pendingState, { emptySessionId: null, syncStatus: 'idle', nextRetryAt: null });
+            }
+            if (retryAt && retryAt > Date.now()) return pendingState;
+            const pendingConfig = await getEffectiveConfig(channel.guild.id, channel.parentId, channel.id);
+            return resetEmptyChannel(client, channel, pendingConfig, pendingState);
+        }
         if (!retryAt || retryAt <= Date.now()) return forceReset(client, channel);
         return pendingState;
     }
@@ -177,10 +187,11 @@ async function readActualVoiceStatus(client, channel) {
 }
 
 async function observeCurrentVoiceStatus(client, channel) {
-    const actualStatus = await readActualVoiceStatus(client, channel);
-    if (actualStatus === undefined) return false;
-
-    await withQueue(channel.id, async () => {
+    return withQueue(channel.id, async () => {
+        // Keep the REST read in the same queue as writes. A presence update
+        // cannot then race this observation with an in-flight status write.
+        const actualStatus = await readActualVoiceStatus(client, channel);
+        if (actualStatus === undefined) return false;
         const state = await getState(channel.guild.id, channel.id);
         const hasPreviousObservation = Boolean(
             state.lastObservedAt || state.currentDiscordValue !== null || state.manualLocked,
@@ -206,8 +217,8 @@ async function observeCurrentVoiceStatus(client, channel) {
             source: manuallyLocked ? 'manual' : state.source,
             syncStatus: state.syncStatus === 'resetPending' ? 'resetPending' : 'idle',
         });
+        return true;
     });
-    return true;
 }
 
 function scheduleWelcomeRestore(client, channelId, operationId, expiresAt) {
@@ -231,7 +242,10 @@ async function resetEmptyChannel(client, channel, config, state) {
     const delay = Math.max(0, Number(config.emptyResetDelaySeconds || 0) * 1000);
     await new Promise(resolve => setTimeout(resolve, delay));
     const refreshed = await getState(channel.guild.id, channel.id);
-    if (channel.members.size > 0 || refreshed.emptySessionId !== sessionId) return refreshed;
+    if (refreshed.emptySessionId !== sessionId) return refreshed;
+    if (channel.members.size > 0) {
+        return updateState(refreshed, { emptySessionId: null, syncStatus: 'idle', nextRetryAt: null });
+    }
     const lock = await acquireWriteLock(channel.guild.id, channel.id, 'reset-empty');
     if (!lock) return refreshed;
     const stateWithLock = lock.state;
@@ -260,7 +274,12 @@ async function resetEmptyChannel(client, channel, config, state) {
             nextRetryAt: null,
         });
     } catch (error) {
-        await updateState(stateWithLock, { syncStatus: 'resetPending', failureCount: (stateWithLock.failureCount || 0) + 1, writeLock: null });
+        await updateState(stateWithLock, {
+            syncStatus: 'resetPending',
+            failureCount: (stateWithLock.failureCount || 0) + 1,
+            nextRetryAt: new Date(Date.now() + Math.min(300000, 1000 * 2 ** Math.min(stateWithLock.failureCount || 0, 8))),
+            writeLock: null,
+        });
         throw error;
     }
 }
@@ -370,6 +389,7 @@ async function forceReset(client, channel) {
                 // synchronization must not consume it while the channel is
                 // still manually locked.
                 syncStatus: 'resetPending',
+                emptySessionId: null,
                 failureCount: (state.failureCount || 0) + 1,
                 nextRetryAt: new Date(Date.now() + Math.min(300000, 1000 * 2 ** Math.min(state.failureCount || 0, 8))),
                 writeLock: null,
