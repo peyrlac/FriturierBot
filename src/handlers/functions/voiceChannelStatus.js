@@ -220,7 +220,8 @@ function resolveStatus({ activities = [], config = DEFAULT_CONFIG, state = {}, v
     else if (effective.defaultStatus) [value, source] = [effective.defaultStatus, 'default'];
     else if (state.lastResolvedValue && !effective.clearWhenNoActivity && state.lastActivityAt && now - new Date(state.lastActivityAt) < effective.staleAfterSeconds * 1000) [value, source] = [state.lastResolvedValue, 'empty-stale'];
 
-    return { value: value || null, source, fingerprint: value ? fingerprint([source, value]) : null, games, mediaActivities, gameMemberCount, mediaMemberCount };
+    const finalValue = value ? String(value).slice(0, 500) : null;
+    return { value: finalValue, source, fingerprint: finalValue ? fingerprint([source, finalValue]) : null, games, mediaActivities, gameMemberCount, mediaMemberCount };
 }
 
 async function getEffectiveConfig(guildId, categoryId, channelId) {

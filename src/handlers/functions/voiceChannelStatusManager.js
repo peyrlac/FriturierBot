@@ -418,6 +418,8 @@ async function observeVoiceStatus(client, channelOrPayload, statusValue) {
         const isRecentBotWrite = (activeWrite && activeWrite.value === status) || (state.lastBotValue === status && state.lastBotWriteAt && Date.now() - new Date(state.lastBotWriteAt).getTime() < 120000);
         if (isRecentBotWrite) return updateState(state, { currentDiscordValue: status, lastObservedAt: new Date(), syncStatus: 'idle' });
         const manuallySet = channel.members.size > 0;
+        const overlayWasChangedByHuman = state.welcomeOverlay?.active &&
+            status !== state.welcomeOverlay.overlayValue;
         return updateState(state, {
             currentDiscordValue: status,
             lastObservedAt: new Date(),
@@ -427,6 +429,16 @@ async function observeVoiceStatus(client, channelOrPayload, statusValue) {
             manualValue: manuallySet ? status : null,
             manualObservedAt: manuallySet ? new Date() : null,
             source: manuallySet ? 'manual' : 'empty',
+            ...(overlayWasChangedByHuman ? {
+                // The overlay remains active, but its restoration target now
+                // becomes the value chosen by the human during the overlay.
+                welcomeOverlay: {
+                    ...state.welcomeOverlay,
+                    originalValue: status,
+                    originalSource: 'manual',
+                    originalFingerprint: null,
+                },
+            } : {}),
             syncStatus: 'idle',
         });
     });
