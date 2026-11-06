@@ -90,6 +90,8 @@ function withQueue(channelId, task) {
 async function syncChannel(client, channelId, options = {}) {
     const channel = client.channels.cache.get(channelId);
     if (!channel?.guild || channel.type !== Discord.ChannelType.GuildVoice) return null;
+    if (typeof client.isFeatureEnabled === 'function' &&
+        !(await client.isFeatureEnabled('voiceChannelStatus', channel.guild.id))) return null;
     return withQueue(channelId, async () => {
         const config = await getEffectiveConfig(channel.guild.id, channel.parentId, channel.id);
         let state = await getState(channel.guild.id, channel.id);
@@ -139,6 +141,19 @@ async function syncChannel(client, channelId, options = {}) {
         }
         return state;
     });
+}
+
+function scheduleWelcomeRestore(client, channelId, operationId, expiresAt) {
+    const key = `welcome:${channelId}`;
+    const previousTimer = timers.get(key);
+    if (previousTimer) clearTimeout(previousTimer);
+    const delay = Math.max(0, new Date(expiresAt).getTime() - Date.now());
+    const timer = setTimeout(() => {
+        if (timers.get(key) !== timer) return;
+        timers.delete(key);
+        restoreWelcome(client, channelId, operationId).catch(() => null);
+    }, delay);
+    timers.set(key, timer);
 }
 
 async function resetEmptyChannel(client, channel, config, state) {
@@ -223,10 +238,7 @@ async function runWelcome(client, channel, users, options = {}) {
             throw error;
         }
         const durationSeconds = options.durationSeconds || config.welcomeOverlay.durationSeconds;
-        const previousTimer = timers.get(`welcome:${channel.id}`);
-        if (previousTimer) clearTimeout(previousTimer);
-        const timer = setTimeout(() => restoreWelcome(client, channel.id, id).catch(() => null), durationSeconds * 1000);
-        timers.set(`welcome:${channel.id}`, timer);
+        scheduleWelcomeRestore(client, channel.id, id, Date.now() + durationSeconds * 1000);
         return lockedState;
     });
 }
@@ -293,7 +305,7 @@ async function restoreWelcome(client, channelId, expectedOperationId) {
         const lock = await acquireWriteLock(channel.guild.id, channel.id, 'welcome-restore');
         if (!lock) return getState(channel.guild.id, channel.id);
         const state = lock.state;
-        if (!state.welcomeOverlay?.active || state.welcomeOverlay.operationId !== expectedOperationId) {
+        if (!state.welcomeOverlay?.active || (expectedOperationId && state.welcomeOverlay.operationId !== expectedOperationId)) {
             return updateState(state, { writeLock: null, syncStatus: 'idle' });
         }
         if (state.currentDiscordValue !== state.welcomeOverlay.overlayValue) return updateState(state, { welcomeOverlay: { active: false }, writeLock: null, syncStatus: 'idle' });
@@ -365,8 +377,22 @@ async function observeVoiceStatus(client, channelOrPayload, statusValue) {
 async function reconcile(client) {
     const tasks = [];
     for (const guild of client.guilds.cache.values()) {
+        if (typeof client.isFeatureEnabled === 'function' &&
+            !(await client.isFeatureEnabled('voiceChannelStatus', guild.id))) continue;
         for (const channel of guild.channels.cache.values()) {
-            if (channel.type === Discord.ChannelType.GuildVoice) tasks.push(syncChannel(client, channel.id, { type: 'reconcile' }).catch(() => null));
+            if (channel.type !== Discord.ChannelType.GuildVoice) continue;
+            tasks.push((async () => {
+                const state = await getState(guild.id, channel.id);
+                if (state.welcomeOverlay?.active) {
+                    const expiresAt = state.welcomeOverlay.expiresAt && new Date(state.welcomeOverlay.expiresAt).getTime();
+                    if (!expiresAt || expiresAt <= Date.now()) {
+                        await restoreWelcome(client, channel.id, state.welcomeOverlay.operationId).catch(() => null);
+                    } else if (expiresAt && state.welcomeOverlay.operationId) {
+                        scheduleWelcomeRestore(client, channel.id, state.welcomeOverlay.operationId, expiresAt);
+                    }
+                }
+                await syncChannel(client, channel.id, { type: 'reconcile' });
+            })().catch(() => null));
         }
     }
     await Promise.all(tasks);
