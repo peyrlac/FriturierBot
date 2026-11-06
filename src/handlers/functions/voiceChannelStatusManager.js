@@ -125,17 +125,24 @@ async function syncChannel(client, channelId, options = {}) {
         if (state.welcomeOverlay?.active && !options.overlay) return state;
 
         const activities = collectActivities(channel);
-        const eligibleActivities = activities.filter(activity =>
-            (activity.family === 'game' && config.activityFamilies.includes('game')) ||
-            (activity.family === 'media' && config.mediaEnabled &&
-                config.activityFamilies.includes('media') && config.providers.includes(activity.provider)),
-        );
-        if (eligibleActivities.length) {
+        const resolutionConfig = { ...config, voiceMemberCount: members.size };
+        // Evaluate candidates without the previous stale value. Only an
+        // activity that can actually produce an automatic status refreshes
+        // lastActivityAt; a game is not eligible when game mode is `none` or
+        // when it does not pass the configured threshold.
+        const candidateDecision = resolveStatus({
+            activities,
+            config: resolutionConfig,
+            state: { ...state, lastActivityAt: null, lastResolvedValue: null },
+            voiceMemberCount: members.size,
+        });
+        const noCandidateSources = new Set(['disabled', 'manual', 'empty', 'default', 'empty-stale']);
+        if (candidateDecision.value && !noCandidateSources.has(candidateDecision.source)) {
             state = await updateState(state, { lastActivityAt: new Date() });
         }
         const decision = resolveStatus({
             activities,
-            config: { ...config, voiceMemberCount: members.size },
+            config: resolutionConfig,
             state,
             voiceMemberCount: members.size,
         });
