@@ -41,6 +41,7 @@ const Schema = new mongoose.Schema({
     pendingCandidateFingerprint: { type: String, default: null },
     pendingCandidateSince: { type: Date, default: null },
     emptySessionId: { type: String, default: null },
+    emptyResetAt: { type: Date, default: null },
     syncStatus: { type: String, enum: ['idle', 'pending', 'resetPending', 'error'], default: 'idle' },
     writeLock: { type: WriteLockSchema, default: null },
     welcomeOverlay: { type: OverlaySchema, default: () => ({}) },

@@ -129,7 +129,7 @@ async function syncChannel(client, channelId, options = {}) {
             if (channel.members.size > 0) {
                 // A member returned during the grace period: cancel only the
                 // empty-session reset, never a separately requested reset.
-                return updateState(pendingState, { emptySessionId: null, syncStatus: 'idle', nextRetryAt: null });
+                return updateState(pendingState, { emptySessionId: null, emptyResetAt: null, syncStatus: 'idle', nextRetryAt: null });
             }
             if (retryAt && retryAt > Date.now()) return pendingState;
             const pendingConfig = await getEffectiveConfig(channel.guild.id, channel.parentId, channel.id);
@@ -332,9 +332,13 @@ function scheduleWelcomeRestore(client, channelId, operationId, expiresAt) {
 async function resetEmptyChannel(client, channel, config, state) {
     if (!config.resetOnEmpty) return state;
     if (state.source === 'empty' && !state.currentDiscordValue && !state.manualLocked && !state.welcomeOverlay?.active && !state.emptySessionId) return state;
-    const sessionId = operationId();
+    const sessionId = state.emptySessionId || operationId();
+    const deadline = state.emptyResetAt
+        ? new Date(state.emptyResetAt)
+        : new Date(Date.now() + Math.max(0, Number(config.emptyResetDelaySeconds || 0) * 1000));
     await updateState(state, {
         emptySessionId: sessionId,
+        emptyResetAt: deadline,
         pendingCandidateActive: false,
         pendingCandidateValue: null,
         pendingCandidateSource: null,
@@ -342,12 +346,12 @@ async function resetEmptyChannel(client, channel, config, state) {
         pendingCandidateSince: null,
         syncStatus: 'resetPending',
     });
-    const delay = Math.max(0, Number(config.emptyResetDelaySeconds || 0) * 1000);
+    const delay = Math.max(0, deadline.getTime() - Date.now());
     await new Promise(resolve => setTimeout(resolve, delay));
     const refreshed = await getState(channel.guild.id, channel.id);
     if (refreshed.emptySessionId !== sessionId) return refreshed;
     if (channel.members.size > 0) {
-        return updateState(refreshed, { emptySessionId: null, syncStatus: 'idle', nextRetryAt: null });
+        return updateState(refreshed, { emptySessionId: null, emptyResetAt: null, syncStatus: 'idle', nextRetryAt: null });
     }
     const lock = await acquireWriteLock(channel.guild.id, channel.id, 'reset-empty');
     if (!lock) return refreshed;
@@ -371,6 +375,7 @@ async function resetEmptyChannel(client, channel, config, state) {
             pendingCandidateFingerprint: null,
             pendingCandidateSince: null,
             emptySessionId: null,
+            emptyResetAt: null,
             syncStatus: 'idle',
             writeLock: null,
             welcomeOverlay: { active: false },
@@ -485,6 +490,7 @@ async function forceReset(client, channel) {
                 manualValue: null,
                 manualObservedAt: null,
                 emptySessionId: null,
+                emptyResetAt: null,
                 lastActivityAt: null,
                 lastActivityFingerprint: null,
                 pendingCandidateActive: false,
