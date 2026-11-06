@@ -115,11 +115,13 @@ async function syncChannel(client, channelId, options = {}) {
         let state = await getState(channel.guild.id, channel.id);
         if (!config.enabled) return state;
         if (!options.force && state.nextRetryAt && Date.now() < new Date(state.nextRetryAt).getTime()) return state;
-        if (isQuietHours(config) && !options.force) return state;
         const members = channel.members;
         // Empty-session reset has priority over welcome overlays. Otherwise an
         // overlay could keep the previous session's lock alive until expiry.
         if (config.resetOnEmpty && members.size === 0) return resetEmptyChannel(client, channel, config, state);
+        // Quiet hours suppress automatic status updates, not cleanup of the
+        // session that just ended.
+        if (isQuietHours(config) && !options.force) return state;
         if (state.welcomeOverlay?.active && !options.overlay) return state;
 
         const activities = collectActivities(channel);
