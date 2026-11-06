@@ -56,7 +56,10 @@ function clone(value) {
 }
 
 function mergeConfig(...configs) {
-    const vocation = configs.find(config => config?.vocation)?.vocation || DEFAULT_CONFIG.vocation;
+    // Les configurations sont fusionnées dans l'ordre guild -> catégorie -> salon.
+    // La dernière vocation déclarée est donc la plus spécifique et doit fournir
+    // ses valeurs par défaut avant l'application des overrides finaux.
+    const vocation = [...configs].reverse().find(config => config?.vocation)?.vocation || DEFAULT_CONFIG.vocation;
     const result = { ...clone(DEFAULT_CONFIG), ...(VOCATION_DEFAULTS[vocation] || {}) };
     for (const config of configs.filter(Boolean)) {
         for (const [key, value] of Object.entries(config)) {
@@ -93,18 +96,21 @@ function normalizeActivity(activity, member) {
     const name = activity.name || activity.details || activity.state;
     if (!name) return null;
     const provider = String(activity.provider || activity.name || '').toLowerCase();
-    const isGame = activity.type === 0 || activity.type === 'PLAYING' || activity.family === 'game';
     const mediaProvider = provider === 'premid' || provider.includes('premid')
         ? 'premid'
         : provider || String(name).toLowerCase();
-    const family = isGame ? 'game' : (MEDIA_PROVIDERS.has(mediaProvider) || activity.family === 'media' ? 'media' : null);
+    const isKnownMedia = MEDIA_PROVIDERS.has(mediaProvider) || activity.family === 'media';
+    // PreMiD peut publier sa Rich Presence avec le type Discord `0` (Playing).
+    // Le fournisseur explicite doit donc primer sur le type brut de l'activité.
+    const isGame = !isKnownMedia && (activity.type === 0 || activity.type === 'PLAYING' || activity.family === 'game');
+    const family = isGame ? 'game' : (isKnownMedia ? 'media' : null);
     if (!family) return null;
     return {
         userId: member?.id || activity.userId || null,
         family,
         provider: mediaProvider,
         providerLabel: activity.providerLabel || activity.service || activity.name || mediaProvider,
-        title: activity.title || activity.details || (family === 'game' ? name : null),
+        title: activity.title || activity.details || activity.state || (family === 'game' ? name : null),
         gameId: family === 'game' ? normalizeGameId(activity.title || name) : null,
         startedAt: activity.createdAt || null,
         observedAt: new Date(),
@@ -116,7 +122,20 @@ function collectActivities(channel) {
     for (const member of channel?.members?.values?.() || []) {
         for (const activity of member.presence?.activities || member.presence?.clientStatus?.activities || []) {
             const normalized = normalizeActivity(activity, member);
-            if (normalized) activities.push(normalized);
+            if (normalized) {
+                activities.push({ ...normalized, rawActivity: activity, member });
+            } else {
+                // Une activité inconnue doit rester disponible pour une famille
+                // enregistrée par extension. Le cœur ne tente simplement pas de
+                // la sélectionner comme jeu ou média.
+                activities.push({
+                    ...activity,
+                    rawActivity: activity,
+                    userId: member.id,
+                    member,
+                    family: activity.family || null,
+                });
+            }
         }
     }
     return activities;
@@ -170,8 +189,13 @@ function resolveStatus({ activities = [], config = DEFAULT_CONFIG, state = {}, v
     if (games.length && effective.gameStatusMode === 'priority') gameValue = `🎮 ${games[0].title}${games[0].participantCount > 1 ? ` · ${games[0].participantCount}` : ''}`.slice(0, 500);
     if (games.length && effective.gameStatusMode === 'generic') gameValue = (effective.genericStatus || '🎮 Multigaming').slice(0, 500);
     if (games.length && effective.gameStatusMode === 'summary') gameValue = games.slice(0, effective.maxSummaryItems).map(game => game.title).join(' | ').slice(0, 500);
+    const gameMemberCount = new Set(games.flatMap(game => [...game.participants])).size;
+    const mediaMemberCount = new Set(mediaActivities.map(activity => activity.userId).filter(Boolean)).size;
 
-    const registeredDecisions = resolveRegisteredFamilies(activities, effective, { state });
+    const registeredDecisions = resolveRegisteredFamilies(activities, effective, {
+        state,
+        rawActivities: activities.map(activity => activity.rawActivity || activity),
+    });
     const registeredDecision = registeredDecisions
         .filter(decision => decision.value || decision.status)
         .sort((a, b) => Number(b.priority || 0) - Number(a.priority || 0))[0];
@@ -181,12 +205,17 @@ function resolveStatus({ activities = [], config = DEFAULT_CONFIG, state = {}, v
     if (effective.activityPriority === 'game-first' && gameValue) [value, source] = [gameValue, 'game'];
     else if (effective.activityPriority === 'media-first' && mediaValue) [value, source] = [mediaValue, 'media'];
     else if (effective.activityPriority === 'mixed' && mediaValue && gameValue) [value, source] = [`${gameValue} · ${mediaValue}`, 'mixed'];
+    else if (effective.activityPriority === 'dominant' && mediaValue && gameValue) {
+        [value, source] = gameMemberCount >= mediaMemberCount
+            ? [gameValue, 'game']
+            : [mediaValue, 'media'];
+    }
     else if (gameValue || mediaValue) [value, source] = [gameValue || mediaValue, gameValue ? 'game' : 'media'];
     else if (registeredDecision) [value, source] = [registeredDecision.value || registeredDecision.status, registeredDecision.family];
     else if (effective.defaultStatus) [value, source] = [effective.defaultStatus, 'default'];
     else if (state.lastResolvedValue && !effective.clearWhenNoActivity && state.lastObservedAt && now - new Date(state.lastObservedAt) < effective.staleAfterSeconds * 1000) [value, source] = [state.lastResolvedValue, 'empty-stale'];
 
-    return { value: value || null, source, fingerprint: value ? fingerprint([source, value]) : null, games, mediaActivities };
+    return { value: value || null, source, fingerprint: value ? fingerprint([source, value]) : null, games, mediaActivities, gameMemberCount, mediaMemberCount };
 }
 
 async function getEffectiveConfig(guildId, categoryId, channelId) {

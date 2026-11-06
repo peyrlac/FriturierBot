@@ -72,6 +72,16 @@ module.exports = {
                 .addNumberOption(option => option.setName('game-share').setDescription('Part minimale des membres actifs').setMinValue(0).setMaxValue(1).setRequired(false))
                 .addBooleanOption(option => option.setName('reset-on-empty').setDescription('Réinitialiser quand le salon est vide').setRequired(false))
                 .addIntegerOption(option => option.setName('game-threshold').setDescription('Nombre minimum de joueurs par jeu').setMinValue(1).setMaxValue(99).setRequired(false))
+                .addBooleanOption(option => option.setName('clear-no-activity').setDescription('Effacer lorsqu’il n’y a plus d’activité').setRequired(false))
+                .addStringOption(option => option.setName('share-denominator').setDescription('Base de calcul du seuil de jeu').setRequired(false).addChoices(
+                    { name: 'Membres actifs', value: 'activeMembers' },
+                    { name: 'Membres du salon', value: 'voiceMembers' },
+                ))
+                .addStringOption(option => option.setName('default-status').setDescription('Statut de secours sans activité').setRequired(false))
+                .addIntegerOption(option => option.setName('min-update-interval').setDescription('Intervalle minimal entre écritures (secondes)').setMinValue(0).setMaxValue(3600).setRequired(false))
+                .addBooleanOption(option => option.setName('quiet-enabled').setDescription('Activer les plages silencieuses').setRequired(false))
+                .addStringOption(option => option.setName('quiet-ranges').setDescription('Plages HH:MM-HH:MM séparées par ||').setRequired(false))
+                .addStringOption(option => option.setName('quiet-timezone').setDescription('Fuseau IANA des plages silencieuses').setRequired(false))
         )
         .addSubcommand(subcommand =>
             subcommand

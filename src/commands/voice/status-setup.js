@@ -3,6 +3,17 @@ const VoiceChannelStatusConfig = require('../../database/models/voiceChannelStat
 const { normalizeGameId } = require('../../handlers/functions/voiceChannelStatus');
 const { syncChannel } = require('../../handlers/functions/voiceChannelStatusManager');
 
+function parseQuietRanges(value) {
+    if (value === null) return null;
+    const ranges = String(value).split('||').map(item => item.trim()).filter(Boolean);
+    const pattern = /^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$/;
+    if (ranges.some(range => !pattern.test(range))) return null;
+    return ranges.map(range => {
+        const [start, end] = range.split('-');
+        return { start, end };
+    });
+}
+
 module.exports = async (client, interaction) => {
     const perms = await client.checkUserPerms({
         flags: [Discord.PermissionsBitField.Flags.ManageGuild],
@@ -26,7 +37,11 @@ module.exports = async (client, interaction) => {
         channelId: scope === 'channel' ? targetId : null,
         updatedBy: interaction.user.id,
     };
-    const update = {};
+    const existingConfig = await VoiceChannelStatusConfig.findOne({ guildId: interaction.guild.id, scope, targetId }).lean();
+    const existingOverrides = existingConfig?.overrides instanceof Map
+        ? Object.fromEntries(existingConfig.overrides)
+        : existingConfig?.overrides || {};
+    const update = { ...existingOverrides };
     const enabled = interaction.options.getBoolean('enabled');
     const vocation = interaction.options.getString('vocation');
     const gameStatusMode = interaction.options.getString('game-mode');
@@ -38,11 +53,19 @@ module.exports = async (client, interaction) => {
     const gameShare = interaction.options.getNumber('game-share');
     const resetOnEmpty = interaction.options.getBoolean('reset-on-empty');
     const minMembers = interaction.options.getInteger('game-threshold');
-    update.enabled = enabled === null ? true : enabled;
+    const clearNoActivity = interaction.options.getBoolean('clear-no-activity');
+    const shareDenominator = interaction.options.getString('share-denominator');
+    const defaultStatus = interaction.options.getString('default-status');
+    const minUpdateInterval = interaction.options.getInteger('min-update-interval');
+    const quietEnabled = interaction.options.getBoolean('quiet-enabled');
+    const quietRangesInput = interaction.options.getString('quiet-ranges');
+    const quietTimezone = interaction.options.getString('quiet-timezone');
+    if (enabled !== null) update.enabled = enabled;
+    else if (!existingConfig) update.enabled = true;
     if (vocation) update.vocation = vocation;
     if (gameStatusMode) update.gameStatusMode = gameStatusMode;
     if (genericStatus !== null) update.genericStatus = genericStatus;
-    if (welcomeEnabled !== null) update.welcomeOverlay = { enabled: welcomeEnabled };
+    if (welcomeEnabled !== null) update.welcomeOverlay = { ...(update.welcomeOverlay || {}), enabled: welcomeEnabled };
     if (welcomeTemplates !== null) update.welcomeOverlay = { ...(update.welcomeOverlay || {}), templates: welcomeTemplates.split('||').map(value => value.trim()).filter(Boolean) };
     if (gameWeights !== null) {
         update.gameWeights = {};
@@ -54,8 +77,30 @@ module.exports = async (client, interaction) => {
     }
     if (activityPriority) update.activityPriority = activityPriority;
     if (gameShare !== null) update.gameThreshold = { ...(update.gameThreshold || {}), minShare: gameShare };
+    if (shareDenominator) update.gameThreshold = { ...(update.gameThreshold || {}), shareDenominator };
     if (resetOnEmpty !== null) update.resetOnEmpty = resetOnEmpty;
     if (minMembers) update.gameThreshold = { ...(update.gameThreshold || {}), minMembers };
+    if (clearNoActivity !== null) update.clearWhenNoActivity = clearNoActivity;
+    if (defaultStatus !== null) update.defaultStatus = defaultStatus;
+    if (minUpdateInterval !== null) update.minUpdateIntervalSeconds = minUpdateInterval;
+    if (quietEnabled !== null || quietRangesInput !== null || quietTimezone !== null) {
+        const quietHours = { ...(update.quietHours || {}) };
+        if (quietEnabled !== null) quietHours.enabled = quietEnabled;
+        if (quietTimezone !== null) {
+            try {
+                new Intl.DateTimeFormat('en-GB', { timeZone: quietTimezone }).format();
+            } catch {
+                return interaction.editReply({ content: '❌ Fuseau horaire invalide. Utilise un identifiant IANA, par exemple `Europe/Brussels`.' });
+            }
+            quietHours.timezone = quietTimezone;
+        }
+        if (quietRangesInput !== null) {
+            const ranges = parseQuietRanges(quietRangesInput);
+            if (!ranges) return interaction.editReply({ content: '❌ Format invalide. Utilise `HH:MM-HH:MM||HH:MM-HH:MM`.' });
+            quietHours.ranges = ranges;
+        }
+        update.quietHours = quietHours;
+    }
     await VoiceChannelStatusConfig.findOneAndUpdate(
         { guildId: interaction.guild.id, scope, targetId },
         { $set: { ...metadata, overrides: update }, $setOnInsert: { createdBy: interaction.user.id } },

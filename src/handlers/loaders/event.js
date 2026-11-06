@@ -9,7 +9,7 @@ module.exports = (client) => {
         messageDelete: 'triggers',
         messageReactionAdd: 'triggers',
         messageReactionRemove: 'triggers',
-        voiceStateUpdate: 'voiceCleanup',
+        voiceStateUpdate: ['voiceCleanup', 'voiceChannelStatus'],
         presenceUpdate: 'voiceChannelStatus',
         voiceChannelStatusUpdate: 'voiceChannelStatus',
         guildMemberAdd: 'welcome',
@@ -18,8 +18,11 @@ module.exports = (client) => {
     const bindEvent = (event, eventName) => async (...args) => {
         const feature = eventFeatures[eventName];
         const guildId = args[0]?.guild?.id;
-        if (feature && guildId && typeof client.isFeatureEnabled === 'function' &&
-            !(await client.isFeatureEnabled(feature, guildId))) return;
+        const features = Array.isArray(feature) ? feature : feature ? [feature] : [];
+        if (features.length && guildId && typeof client.isFeatureEnabled === 'function') {
+            const enabled = await Promise.all(features.map(name => client.isFeatureEnabled(name, guildId)));
+            if (!enabled.some(Boolean)) return;
+        }
         return event(client, ...args);
     };
 

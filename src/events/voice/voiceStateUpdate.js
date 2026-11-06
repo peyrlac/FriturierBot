@@ -8,18 +8,28 @@ const { handleVoiceStateUpdate } = require('../../handlers/functions/voiceChanne
 const cleanupIntervals = new Map();
 
 module.exports = async (client, oldState, newState) => {
+    const guildId = oldState?.guild?.id || newState?.guild?.id;
+    const featureEnabled = async feature => {
+        if (!guildId || typeof client.isFeatureEnabled !== 'function') return true;
+        return client.isFeatureEnabled(feature, guildId);
+    };
+
+    if (await featureEnabled('voiceChannelStatus')) {
+        try {
+            await handleVoiceStateUpdate(client, oldState, newState);
+        } catch (error) {
+            console.error('[Voice Channel Status] Error handling voice state update:', error);
+        }
+    }
+
+    if (!await featureEnabled('voiceCleanup')) return;
+
     try {
         await voiceRoleManager(client, oldState, newState);
     } catch (error) {
         console.error('[Voice Role Manager] Error handling voice state update:', error);
     }
     try {
-        await handleVoiceStateUpdate(client, oldState, newState);
-    } catch (error) {
-        console.error('[Voice Channel Status] Error handling voice state update:', error);
-    }
-    try {
-        const guildId = oldState?.guild?.id || newState?.guild?.id;
         if (!guildId) return;
 
         const voiceData = await Voice.findOne({ Guild: guildId });

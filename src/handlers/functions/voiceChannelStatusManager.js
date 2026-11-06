@@ -96,6 +96,7 @@ async function syncChannel(client, channelId, options = {}) {
         if (!config.enabled) return state;
         if (!options.force && state.nextRetryAt && Date.now() < new Date(state.nextRetryAt).getTime()) return state;
         if (isQuietHours(config) && !options.force) return state;
+        if (state.welcomeOverlay?.active && !options.overlay) return state;
         const members = channel.members;
         if (config.resetOnEmpty && members.size === 0 && !options.overlay) return resetEmptyChannel(client, channel, config, state);
 
@@ -199,15 +200,34 @@ async function runWelcome(client, channel, users, options = {}) {
             .replaceAll('{channel}', channel.name)
             .replaceAll('{count}', String(names.length || 1))
             .slice(0, 500);
-        const original = state.currentDiscordValue;
+        const lock = await acquireWriteLock(channel.guild.id, channel.id, 'welcome');
+        if (!lock) return state;
+        const lockedState = lock.state;
+        const activeOverlay = lockedState.welcomeOverlay?.active;
+        const original = activeOverlay
+            ? lockedState.welcomeOverlay.originalValue
+            : lockedState.currentDiscordValue;
+        const originalSource = activeOverlay
+            ? lockedState.welcomeOverlay.originalSource
+            : lockedState.source;
+        const originalFingerprint = activeOverlay
+            ? lockedState.welcomeOverlay.originalFingerprint
+            : lockedState.lastActivityFingerprint;
         const id = operationId();
-        await writeVoiceStatus(client, channel, value);
-        recentWrites.set(channel.id, { value, operationId: id, expiresAt: Date.now() + 120000 });
-        await updateState(state, { welcomeOverlay: { active: true, originalValue: original, originalSource: state.source, overlayValue: value, startedAt: new Date(), expiresAt: new Date(Date.now() + config.welcomeOverlay.durationSeconds * 1000), originalFingerprint: state.lastActivityFingerprint, operationId: id }, currentDiscordValue: value, lastBotValue: value, lastBotWriteId: id, lastBotWriteAt: new Date(), lastWriteAt: new Date() });
+        try {
+            await writeVoiceStatus(client, channel, value);
+            recentWrites.set(channel.id, { value, operationId: id, expiresAt: Date.now() + 120000 });
+            await updateState(lockedState, { welcomeOverlay: { active: true, originalValue: original, originalSource, overlayValue: value, startedAt: new Date(), expiresAt: new Date(Date.now() + config.welcomeOverlay.durationSeconds * 1000), originalFingerprint, operationId: id }, currentDiscordValue: value, lastBotValue: value, lastBotWriteId: id, lastBotWriteAt: new Date(), lastWriteAt: new Date(), writeLock: null, syncStatus: 'idle' });
+        } catch (error) {
+            await updateState(lockedState, { writeLock: null, syncStatus: 'error', failureCount: (lockedState.failureCount || 0) + 1 });
+            throw error;
+        }
         const durationSeconds = options.durationSeconds || config.welcomeOverlay.durationSeconds;
+        const previousTimer = timers.get(`welcome:${channel.id}`);
+        if (previousTimer) clearTimeout(previousTimer);
         const timer = setTimeout(() => restoreWelcome(client, channel.id, id).catch(() => null), durationSeconds * 1000);
         timers.set(`welcome:${channel.id}`, timer);
-        return state;
+        return lockedState;
     });
 }
 
@@ -231,42 +251,68 @@ async function forceReset(client, channel) {
         if (!lock) return getState(channel.guild.id, channel.id);
         const state = lock.state;
         const id = lock.id;
-        await writeVoiceStatus(client, channel, null);
-        recentWrites.set(channel.id, { value: null, operationId: id, expiresAt: Date.now() + 120000 });
-        return updateState(state, {
-            currentDiscordValue: null,
-            lastBotValue: null,
-            lastResolvedValue: null,
-            source: 'empty',
-            manualLocked: false,
-            manualValue: null,
-            manualObservedAt: null,
-            lastActivityFingerprint: null,
-            emptySessionId: null,
-            welcomeOverlay: { active: false },
-            syncStatus: 'idle',
-            writeLock: null,
-            lastBotWriteId: id,
-            lastBotWriteAt: new Date(),
-            lastWriteAt: new Date(),
-            lastObservedAt: new Date(),
-            failureCount: 0,
-            nextRetryAt: null,
-        });
+        try {
+            await writeVoiceStatus(client, channel, null);
+            recentWrites.set(channel.id, { value: null, operationId: id, expiresAt: Date.now() + 120000 });
+            return updateState(state, {
+                currentDiscordValue: null,
+                lastBotValue: null,
+                lastResolvedValue: null,
+                source: 'empty',
+                manualLocked: false,
+                manualValue: null,
+                manualObservedAt: null,
+                emptySessionId: null,
+                lastActivityFingerprint: null,
+                welcomeOverlay: { active: false },
+                syncStatus: 'idle',
+                writeLock: null,
+                lastBotWriteId: id,
+                lastBotWriteAt: new Date(),
+                lastWriteAt: new Date(),
+                failureCount: 0,
+                nextRetryAt: null,
+            });
+        } catch (error) {
+            await updateState(state, {
+                syncStatus: 'error',
+                failureCount: (state.failureCount || 0) + 1,
+                nextRetryAt: new Date(Date.now() + Math.min(300000, 1000 * 2 ** Math.min(state.failureCount || 0, 8))),
+                writeLock: null,
+            });
+            throw error;
+        }
     });
 }
 
 async function restoreWelcome(client, channelId, expectedOperationId) {
-    return withQueue(channelId, async () => {
+    let restored = false;
+    const result = await withQueue(channelId, async () => {
         const channel = client.channels.cache.get(channelId);
         if (!channel) return null;
-        const state = await getState(channel.guild.id, channel.id);
-        if (!state.welcomeOverlay?.active || state.welcomeOverlay.operationId !== expectedOperationId) return state;
-        if (state.currentDiscordValue !== state.welcomeOverlay.overlayValue) return updateState(state, { welcomeOverlay: { active: false } });
-        await writeVoiceStatus(client, channel, state.welcomeOverlay.originalValue);
-        recentWrites.set(channel.id, { value: state.welcomeOverlay.originalValue, operationId: operationId(), expiresAt: Date.now() + 120000 });
-        return updateState(state, { currentDiscordValue: state.welcomeOverlay.originalValue, lastBotValue: state.welcomeOverlay.originalValue, source: state.welcomeOverlay.originalSource || 'unknown', lastBotWriteId: operationId(), lastBotWriteAt: new Date(), lastWriteAt: new Date(), welcomeOverlay: { active: false } });
+        const lock = await acquireWriteLock(channel.guild.id, channel.id, 'welcome-restore');
+        if (!lock) return getState(channel.guild.id, channel.id);
+        const state = lock.state;
+        if (!state.welcomeOverlay?.active || state.welcomeOverlay.operationId !== expectedOperationId) {
+            return updateState(state, { writeLock: null, syncStatus: 'idle' });
+        }
+        if (state.currentDiscordValue !== state.welcomeOverlay.overlayValue) return updateState(state, { welcomeOverlay: { active: false }, writeLock: null, syncStatus: 'idle' });
+        try {
+            await writeVoiceStatus(client, channel, state.welcomeOverlay.originalValue);
+            const id = operationId();
+            recentWrites.set(channel.id, { value: state.welcomeOverlay.originalValue, operationId: id, expiresAt: Date.now() + 120000 });
+            const restoredState = await updateState(state, { currentDiscordValue: state.welcomeOverlay.originalValue, lastBotValue: state.welcomeOverlay.originalValue, source: state.welcomeOverlay.originalSource || 'unknown', lastBotWriteId: id, lastBotWriteAt: new Date(), lastWriteAt: new Date(), welcomeOverlay: { active: false }, writeLock: null, syncStatus: 'idle' });
+            restored = true;
+            return restoredState;
+        } catch (error) {
+            await updateState(state, { writeLock: null, syncStatus: 'error', failureCount: (state.failureCount || 0) + 1 });
+            throw error;
+        }
     });
+    if (restored) {
+        await syncChannel(client, channelId, { force: true, type: 'welcome-expired' }).catch(() => null);
+    }
+    return result;
 }
 
 async function handleVoiceStateUpdate(client, oldState, newState) {
@@ -292,23 +338,28 @@ async function observeVoiceStatus(client, channelOrPayload, statusValue) {
     const status = statusValue ?? channelOrPayload?.status ?? null;
     const channel = channelId ? client.channels.cache.get(channelId) : null;
     if (!channel?.guild) return null;
-    return withQueue(channel.id, async () => {
+    const observedState = await withQueue(channel.id, async () => {
         const state = await getState(channel.guild.id, channel.id);
         const recentWrite = recentWrites.get(channel.id);
         if (recentWrite && recentWrite.expiresAt < Date.now()) recentWrites.delete(channel.id);
         const activeWrite = recentWrites.get(channel.id);
         const isRecentBotWrite = (activeWrite && activeWrite.value === status) || (state.lastBotValue === status && state.lastBotWriteAt && Date.now() - new Date(state.lastBotWriteAt).getTime() < 120000);
         if (isRecentBotWrite) return updateState(state, { currentDiscordValue: status, lastObservedAt: new Date(), syncStatus: 'idle' });
+        const manuallySet = Boolean(status);
         return updateState(state, {
             currentDiscordValue: status,
             lastObservedAt: new Date(),
-            manualLocked: channel.members.size > 0,
-            manualValue: status,
-            manualObservedAt: new Date(),
-            source: 'manual',
+            manualLocked: manuallySet && channel.members.size > 0,
+            manualValue: manuallySet ? status : null,
+            manualObservedAt: manuallySet ? new Date() : null,
+            source: manuallySet ? 'manual' : 'empty',
             syncStatus: 'idle',
         });
     });
+    if (!status && channel.members.size > 0) {
+        return syncChannel(client, channel.id, { type: 'manual-clear' });
+    }
+    return observedState;
 }
 
 async function reconcile(client) {
