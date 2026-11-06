@@ -261,6 +261,16 @@ async function runWelcome(client, channel, users, options = {}) {
     return withQueue(channel.id, async () => {
         const config = await getEffectiveConfig(channel.guild.id, channel.parentId, channel.id);
         if (!config.enabled || (!config.welcomeOverlay?.enabled && !options.force) || (isQuietHours(config) && !options.force)) return null;
+        const queuedUsers = Array.isArray(users) ? users : [];
+        const currentMembers = queuedUsers.filter(user => {
+            const userId = user?.id || user?.user?.id || user?.userId;
+            return userId && channel.members.has(userId);
+        });
+        // The batch runs after a delay, so the original joiners may no longer
+        // be present. Never recreate a status on an empty channel after its
+        // empty-session reset has completed.
+        if (!channel.members.size || (queuedUsers.length && !currentMembers.length)) return null;
+        users = currentMembers.length ? currentMembers : queuedUsers;
         const state = await getState(channel.guild.id, channel.id);
         const templates = (options.message ? [options.message] : config.welcomeOverlay.templates || []).filter(Boolean);
         if (!templates.length) return state;
