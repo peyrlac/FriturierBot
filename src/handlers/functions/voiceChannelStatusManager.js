@@ -9,11 +9,30 @@ const {
 
 const queues = new Map();
 const timers = new Map();
+const stabilityTimers = new Map();
 const welcomeBatches = new Map();
 const recentWrites = new Map();
 
 function operationId() {
     return crypto.randomUUID();
+}
+
+function scheduleStabilityCheck(client, channelId, dueAt) {
+    const previous = stabilityTimers.get(channelId);
+    if (previous) clearTimeout(previous);
+    const delay = Math.max(0, dueAt - Date.now());
+    const timer = setTimeout(() => {
+        if (stabilityTimers.get(channelId) !== timer) return;
+        stabilityTimers.delete(channelId);
+        syncChannel(client, channelId, { type: 'stability' }).catch(() => null);
+    }, delay);
+    stabilityTimers.set(channelId, timer);
+}
+
+function clearStabilityCheck(channelId) {
+    const timer = stabilityTimers.get(channelId);
+    if (timer) clearTimeout(timer);
+    stabilityTimers.delete(channelId);
 }
 
 function getChannel(client, guildId, channelId) {
@@ -147,7 +166,60 @@ async function syncChannel(client, channelId, options = {}) {
             voiceMemberCount: members.size,
         });
         const nextValue = decision.value || null;
-        if (decision.source === 'manual') return state;
+        if (decision.source === 'manual') {
+            clearStabilityCheck(channel.id);
+            if (state.pendingCandidateActive) {
+                state = await updateState(state, {
+                    pendingCandidateActive: false,
+                    pendingCandidateValue: null,
+                    pendingCandidateSource: null,
+                    pendingCandidateFingerprint: null,
+                    pendingCandidateSince: null,
+                });
+            }
+            return state;
+        }
+        const debounceMs = Math.max(0, Number(config.debounceSeconds || 0) * 1000);
+        const needsAutomaticWrite = nextValue !== state.currentDiscordValue;
+        if (!options.force && !options.overlay && debounceMs > 0 && needsAutomaticWrite) {
+            const sameCandidate = state.pendingCandidateActive &&
+                state.pendingCandidateValue === nextValue &&
+                state.pendingCandidateSource === decision.source;
+            if (!sameCandidate) {
+                const since = new Date();
+                state = await updateState(state, {
+                    pendingCandidateActive: true,
+                    pendingCandidateValue: nextValue,
+                    pendingCandidateSource: decision.source,
+                    pendingCandidateFingerprint: decision.fingerprint,
+                    pendingCandidateSince: since,
+                });
+                scheduleStabilityCheck(client, channel.id, since.getTime() + debounceMs);
+                return state;
+            }
+            const pendingSince = state.pendingCandidateSince && new Date(state.pendingCandidateSince).getTime();
+            const stableAt = (pendingSince || Date.now()) + debounceMs;
+            if (Date.now() < stableAt) {
+                scheduleStabilityCheck(client, channel.id, stableAt);
+                return state;
+            }
+            const minWriteAt = state.lastWriteAt &&
+                new Date(state.lastWriteAt).getTime() + Number(config.minUpdateIntervalSeconds || 0) * 1000;
+            if (minWriteAt && minWriteAt > Date.now()) {
+                scheduleStabilityCheck(client, channel.id, minWriteAt);
+                return state;
+            }
+            clearStabilityCheck(channel.id);
+        } else if (!needsAutomaticWrite && state.pendingCandidateActive) {
+            clearStabilityCheck(channel.id);
+            state = await updateState(state, {
+                pendingCandidateActive: false,
+                pendingCandidateValue: null,
+                pendingCandidateSource: null,
+                pendingCandidateFingerprint: null,
+                pendingCandidateSince: null,
+            });
+        }
         if (!options.force && nextValue === state.lastBotValue && nextValue === state.currentDiscordValue) return state;
         if (!options.force && state.lastWriteAt && Date.now() - new Date(state.lastWriteAt).getTime() < Number(config.minUpdateIntervalSeconds || 0) * 1000) return state;
         const lock = await acquireWriteLock(channel.guild.id, channel.id, options.type || 'sync');
@@ -167,6 +239,11 @@ async function syncChannel(client, channelId, options = {}) {
                 lastWriteAt: new Date(),
                 lastObservedAt: new Date(),
                 lastActivityFingerprint: decision.fingerprint,
+                pendingCandidateActive: false,
+                pendingCandidateValue: null,
+                pendingCandidateSource: null,
+                pendingCandidateFingerprint: null,
+                pendingCandidateSince: null,
                 syncStatus: 'idle',
                 writeLock: null,
                 failureCount: 0,
@@ -247,7 +324,15 @@ async function resetEmptyChannel(client, channel, config, state) {
     if (!config.resetOnEmpty) return state;
     if (state.source === 'empty' && !state.currentDiscordValue && !state.manualLocked && !state.welcomeOverlay?.active && !state.emptySessionId) return state;
     const sessionId = operationId();
-    await updateState(state, { emptySessionId: sessionId, syncStatus: 'resetPending' });
+    await updateState(state, {
+        emptySessionId: sessionId,
+        pendingCandidateActive: false,
+        pendingCandidateValue: null,
+        pendingCandidateSource: null,
+        pendingCandidateFingerprint: null,
+        pendingCandidateSince: null,
+        syncStatus: 'resetPending',
+    });
     const delay = Math.max(0, Number(config.emptyResetDelaySeconds || 0) * 1000);
     await new Promise(resolve => setTimeout(resolve, delay));
     const refreshed = await getState(channel.guild.id, channel.id);
@@ -271,6 +356,11 @@ async function resetEmptyChannel(client, channel, config, state) {
             manualValue: null,
             manualObservedAt: null,
             lastActivityFingerprint: null,
+            pendingCandidateActive: false,
+            pendingCandidateValue: null,
+            pendingCandidateSource: null,
+            pendingCandidateFingerprint: null,
+            pendingCandidateSince: null,
             emptySessionId: null,
             syncStatus: 'idle',
             writeLock: null,
@@ -309,6 +399,7 @@ async function runWelcome(client, channel, users, options = {}) {
         if (!channel.members.size || (automaticBatch && queuedUsers.length && !currentMembers.length)) return null;
         users = automaticBatch && currentMembers.length ? currentMembers : queuedUsers;
         const state = await getState(channel.guild.id, channel.id);
+        if (state.syncStatus === 'resetPending' && !state.emptySessionId) return state;
         const templates = (options.message ? [options.message] : config.welcomeOverlay.templates || []).filter(Boolean);
         if (!templates.length) return state;
         const template = templates[Math.floor(Math.random() * templates.length)];
@@ -324,6 +415,10 @@ async function runWelcome(client, channel, users, options = {}) {
         const lock = await acquireWriteLock(channel.guild.id, channel.id, 'welcome');
         if (!lock) return state;
         const lockedState = lock.state;
+        if (lockedState.syncStatus === 'resetPending' && !lockedState.emptySessionId) {
+            await updateState(lockedState, { writeLock: null });
+            return lockedState;
+        }
         const activeOverlay = lockedState.welcomeOverlay?.active;
         const original = activeOverlay
             ? lockedState.welcomeOverlay.originalValue
@@ -383,6 +478,11 @@ async function forceReset(client, channel) {
                 emptySessionId: null,
                 lastActivityAt: null,
                 lastActivityFingerprint: null,
+                pendingCandidateActive: false,
+                pendingCandidateValue: null,
+                pendingCandidateSource: null,
+                pendingCandidateFingerprint: null,
+                pendingCandidateSince: null,
                 welcomeOverlay: { active: false },
                 syncStatus: 'idle',
                 writeLock: null,
