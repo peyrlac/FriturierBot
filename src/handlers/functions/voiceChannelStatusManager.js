@@ -100,9 +100,11 @@ async function syncChannel(client, channelId, options = {}) {
         if (!config.enabled) return state;
         if (!options.force && state.nextRetryAt && Date.now() < new Date(state.nextRetryAt).getTime()) return state;
         if (isQuietHours(config) && !options.force) return state;
-        if (state.welcomeOverlay?.active && !options.overlay) return state;
         const members = channel.members;
-        if (config.resetOnEmpty && members.size === 0 && !options.overlay) return resetEmptyChannel(client, channel, config, state);
+        // Empty-session reset has priority over welcome overlays. Otherwise an
+        // overlay could keep the previous session's lock alive until expiry.
+        if (config.resetOnEmpty && members.size === 0) return resetEmptyChannel(client, channel, config, state);
+        if (state.welcomeOverlay?.active && !options.overlay) return state;
 
         const activities = collectActivities(channel);
         const eligibleActivities = activities.filter(activity =>
@@ -262,6 +264,7 @@ async function runWelcome(client, channel, users, options = {}) {
         const config = await getEffectiveConfig(channel.guild.id, channel.parentId, channel.id);
         if (!config.enabled || (!config.welcomeOverlay?.enabled && !options.force) || (isQuietHours(config) && !options.force)) return null;
         const queuedUsers = Array.isArray(users) ? users : [];
+        const automaticBatch = !options.force && !options.message;
         const currentMembers = queuedUsers.filter(user => {
             const userId = user?.id || user?.user?.id || user?.userId;
             return userId && channel.members.has(userId);
@@ -269,8 +272,8 @@ async function runWelcome(client, channel, users, options = {}) {
         // The batch runs after a delay, so the original joiners may no longer
         // be present. Never recreate a status on an empty channel after its
         // empty-session reset has completed.
-        if (!channel.members.size || (queuedUsers.length && !currentMembers.length)) return null;
-        users = currentMembers.length ? currentMembers : queuedUsers;
+        if (!channel.members.size || (automaticBatch && queuedUsers.length && !currentMembers.length)) return null;
+        users = automaticBatch && currentMembers.length ? currentMembers : queuedUsers;
         const state = await getState(channel.guild.id, channel.id);
         const templates = (options.message ? [options.message] : config.welcomeOverlay.templates || []).filter(Boolean);
         if (!templates.length) return state;
