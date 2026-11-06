@@ -105,13 +105,16 @@ function normalizeActivity(activity, member) {
     const isGame = !isKnownMedia && (activity.type === 0 || activity.type === 'PLAYING' || activity.family === 'game');
     const family = isGame ? 'game' : (isKnownMedia ? 'media' : null);
     if (!family) return null;
+    const title = family === 'game'
+        ? (activity.title || activity.name || name)
+        : (activity.title || activity.details || activity.state || name);
     return {
         userId: member?.id || activity.userId || null,
         family,
         provider: mediaProvider,
         providerLabel: activity.providerLabel || activity.service || activity.name || mediaProvider,
-        title: activity.title || activity.details || activity.state || (family === 'game' ? name : null),
-        gameId: family === 'game' ? normalizeGameId(activity.title || name) : null,
+        title,
+        gameId: family === 'game' ? normalizeGameId(activity.title || activity.name || name) : null,
         startedAt: activity.createdAt || null,
         observedAt: new Date(),
     };
@@ -155,7 +158,9 @@ function groupGames(activities, config) {
         groups.set(activity.gameId, current);
     }
 
-    const activeMembers = new Set(activities.filter(item => item.userId).map(item => item.userId)).size;
+    const activeMembers = new Set(activities
+        .filter(item => item.userId && (item.family === 'game' || item.family === 'media'))
+        .map(item => item.userId)).size;
     const voiceMembers = config.voiceMemberCount || activeMembers;
     const threshold = config.gameThreshold || DEFAULT_CONFIG.gameThreshold;
     return [...groups.values()]
@@ -213,7 +218,7 @@ function resolveStatus({ activities = [], config = DEFAULT_CONFIG, state = {}, v
     else if (gameValue || mediaValue) [value, source] = [gameValue || mediaValue, gameValue ? 'game' : 'media'];
     else if (registeredDecision) [value, source] = [registeredDecision.value || registeredDecision.status, registeredDecision.family];
     else if (effective.defaultStatus) [value, source] = [effective.defaultStatus, 'default'];
-    else if (state.lastResolvedValue && !effective.clearWhenNoActivity && state.lastObservedAt && now - new Date(state.lastObservedAt) < effective.staleAfterSeconds * 1000) [value, source] = [state.lastResolvedValue, 'empty-stale'];
+    else if (state.lastResolvedValue && !effective.clearWhenNoActivity && state.lastActivityAt && now - new Date(state.lastActivityAt) < effective.staleAfterSeconds * 1000) [value, source] = [state.lastResolvedValue, 'empty-stale'];
 
     return { value: value || null, source, fingerprint: value ? fingerprint([source, value]) : null, games, mediaActivities, gameMemberCount, mediaMemberCount };
 }

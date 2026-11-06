@@ -104,8 +104,17 @@ async function syncChannel(client, channelId, options = {}) {
         const members = channel.members;
         if (config.resetOnEmpty && members.size === 0 && !options.overlay) return resetEmptyChannel(client, channel, config, state);
 
+        const activities = collectActivities(channel);
+        const eligibleActivities = activities.filter(activity =>
+            (activity.family === 'game' && config.activityFamilies.includes('game')) ||
+            (activity.family === 'media' && config.mediaEnabled &&
+                config.activityFamilies.includes('media') && config.providers.includes(activity.provider)),
+        );
+        if (eligibleActivities.length) {
+            state = await updateState(state, { lastActivityAt: new Date() });
+        }
         const decision = resolveStatus({
-            activities: collectActivities(channel),
+            activities,
             config: { ...config, voiceMemberCount: members.size },
             state,
             voiceMemberCount: members.size,
@@ -320,6 +329,7 @@ async function forceReset(client, channel) {
                 manualValue: null,
                 manualObservedAt: null,
                 emptySessionId: null,
+                lastActivityAt: null,
                 lastActivityFingerprint: null,
                 welcomeOverlay: { active: false },
                 syncStatus: 'idle',

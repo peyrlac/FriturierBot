@@ -33,6 +33,7 @@ const Schema = new mongoose.Schema({
     manualObservedAt: { type: Date, default: null },
     lastWriteAt: { type: Date, default: null },
     lastObservedAt: { type: Date, default: null },
+    lastActivityAt: { type: Date, default: null },
     lastActivityFingerprint: { type: String, default: null },
     emptySessionId: { type: String, default: null },
     syncStatus: { type: String, enum: ['idle', 'pending', 'resetPending', 'error'], default: 'idle' },
