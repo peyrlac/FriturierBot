@@ -10,6 +10,8 @@ module.exports = (client) => {
         messageReactionAdd: 'triggers',
         messageReactionRemove: 'triggers',
         voiceStateUpdate: 'voiceCleanup',
+        presenceUpdate: 'voiceChannelStatus',
+        voiceChannelStatusUpdate: 'voiceChannelStatus',
         guildMemberAdd: 'welcome',
     };
 

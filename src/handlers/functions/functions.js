@@ -6,7 +6,8 @@ const VoiceSchema = require("../../database/models/voiceChannels");
 
 function resolveSubcommandPath(interaction) {
     const commandPathAliases = {
-        evenement: 'event'
+        evenement: 'event',
+        vocal: 'voice'
     };
     const command = commandPathAliases[interaction.commandName] || interaction.commandName;
     const group = typeof interaction.options?.getSubcommandGroup === 'function'

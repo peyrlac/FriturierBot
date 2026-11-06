@@ -1,8 +1,15 @@
 const discord = require('discord.js');
 
 const ticketChannels = require("../../database/models/ticketChannels");
+const voiceChannelStatusConfig = require('../../database/models/voiceChannelStatusConfig');
+const voiceChannelStatusState = require('../../database/models/voiceChannelStatusState');
 
 module.exports = async (client, channel) => {
+    await Promise.all([
+        voiceChannelStatusConfig.deleteMany({ guildId: channel.guild.id, $or: [{ channelId: channel.id }, { categoryId: channel.id }, { targetId: channel.id }] }),
+        voiceChannelStatusState.deleteOne({ guildId: channel.guild.id, channelId: channel.id }),
+    ]).catch(() => null);
+
     let types = {
         0: "Text Channel",
         2: "Voice Channel",

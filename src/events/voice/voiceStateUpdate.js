@@ -2,12 +2,22 @@ const Discord = require('discord.js');
 const Voice = require("../../database/models/voice");
 const VoiceChannels = require("../../database/models/voiceChannels");
 const voiceRoleManager = require("./voiceRoleManager"); // Chemin relatif
+const { handleVoiceStateUpdate } = require('../../handlers/functions/voiceChannelStatusManager');
 
 // Map pour stocker les intervalles par guild
 const cleanupIntervals = new Map();
 
 module.exports = async (client, oldState, newState) => {
-    await voiceRoleManager(client, oldState, newState);
+    try {
+        await voiceRoleManager(client, oldState, newState);
+    } catch (error) {
+        console.error('[Voice Role Manager] Error handling voice state update:', error);
+    }
+    try {
+        await handleVoiceStateUpdate(client, oldState, newState);
+    } catch (error) {
+        console.error('[Voice Channel Status] Error handling voice state update:', error);
+    }
     try {
         const guildId = oldState?.guild?.id || newState?.guild?.id;
         if (!guildId) return;
