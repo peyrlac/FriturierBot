@@ -12,6 +12,7 @@ const timers = new Map();
 const stabilityTimers = new Map();
 const welcomeBatches = new Map();
 const recentWrites = new Map();
+const recentWriteHistory = new Map();
 
 function operationId() {
     return crypto.randomUUID();
@@ -33,6 +34,14 @@ function clearStabilityCheck(channelId) {
     const timer = stabilityTimers.get(channelId);
     if (timer) clearTimeout(timer);
     stabilityTimers.delete(channelId);
+}
+
+function rememberRecentWrite(channelId, write) {
+    recentWrites.set(channelId, write);
+    const history = (recentWriteHistory.get(channelId) || [])
+        .filter(entry => entry.expiresAt >= Date.now());
+    history.push(write);
+    recentWriteHistory.set(channelId, history.slice(-8));
 }
 
 function getChannel(client, guildId, channelId) {
@@ -228,7 +237,7 @@ async function syncChannel(client, channelId, options = {}) {
         const id = lock.id;
         try {
             await writeVoiceStatus(client, channel, nextValue);
-            recentWrites.set(channel.id, { value: nextValue, operationId: id, expiresAt: Date.now() + 120000 });
+            rememberRecentWrite(channel.id, { value: nextValue, operationId: id, expiresAt: Date.now() + 120000 });
             await updateState(state, {
                 currentDiscordValue: nextValue,
                 lastBotValue: nextValue,
@@ -346,7 +355,7 @@ async function resetEmptyChannel(client, channel, config, state) {
     const id = lock.id;
     try {
         await writeVoiceStatus(client, channel, null);
-        recentWrites.set(channel.id, { value: null, operationId: id, expiresAt: Date.now() + 120000 });
+        rememberRecentWrite(channel.id, { value: null, operationId: id, expiresAt: Date.now() + 120000 });
         return updateState(stateWithLock, {
             currentDiscordValue: null,
             lastBotValue: null,
@@ -432,7 +441,7 @@ async function runWelcome(client, channel, users, options = {}) {
         const id = operationId();
         try {
             await writeVoiceStatus(client, channel, value);
-            recentWrites.set(channel.id, { value, operationId: id, expiresAt: Date.now() + 120000 });
+            rememberRecentWrite(channel.id, { value, operationId: id, expiresAt: Date.now() + 120000 });
             await updateState(lockedState, { welcomeOverlay: { active: true, originalValue: original, originalSource, overlayValue: value, startedAt: new Date(), expiresAt: new Date(Date.now() + config.welcomeOverlay.durationSeconds * 1000), originalFingerprint, operationId: id }, currentDiscordValue: value, lastBotValue: value, lastBotWriteId: id, lastBotWriteAt: new Date(), lastWriteAt: new Date(), writeLock: null, syncStatus: 'idle' });
         } catch (error) {
             await updateState(lockedState, { writeLock: null, syncStatus: 'error', failureCount: (lockedState.failureCount || 0) + 1 });
@@ -466,7 +475,7 @@ async function forceReset(client, channel) {
         const id = lock.id;
         try {
             await writeVoiceStatus(client, channel, null);
-            recentWrites.set(channel.id, { value: null, operationId: id, expiresAt: Date.now() + 120000 });
+            rememberRecentWrite(channel.id, { value: null, operationId: id, expiresAt: Date.now() + 120000 });
             return updateState(state, {
                 currentDiscordValue: null,
                 lastBotValue: null,
@@ -510,12 +519,17 @@ async function forceReset(client, channel) {
 
 async function restoreWelcome(client, channelId, expectedOperationId) {
     let restored = false;
+    let resetDeferred = false;
     const result = await withQueue(channelId, async () => {
         const channel = client.channels.cache.get(channelId);
         if (!channel) return null;
         const lock = await acquireWriteLock(channel.guild.id, channel.id, 'welcome-restore');
         if (!lock) return getState(channel.guild.id, channel.id);
         const state = lock.state;
+        if (state.syncStatus === 'resetPending' && !state.emptySessionId) {
+            resetDeferred = true;
+            return updateState(state, { welcomeOverlay: { active: false }, writeLock: null });
+        }
         if (!state.welcomeOverlay?.active || (expectedOperationId && state.welcomeOverlay.operationId !== expectedOperationId)) {
             return updateState(state, { writeLock: null, syncStatus: 'idle' });
         }
@@ -523,7 +537,7 @@ async function restoreWelcome(client, channelId, expectedOperationId) {
         try {
             await writeVoiceStatus(client, channel, state.welcomeOverlay.originalValue);
             const id = operationId();
-            recentWrites.set(channel.id, { value: state.welcomeOverlay.originalValue, operationId: id, expiresAt: Date.now() + 120000 });
+            rememberRecentWrite(channel.id, { value: state.welcomeOverlay.originalValue, operationId: id, expiresAt: Date.now() + 120000 });
             const restoredState = await updateState(state, { currentDiscordValue: state.welcomeOverlay.originalValue, lastBotValue: state.welcomeOverlay.originalValue, source: state.welcomeOverlay.originalSource || 'unknown', lastBotWriteId: id, lastBotWriteAt: new Date(), lastWriteAt: new Date(), welcomeOverlay: { active: false }, writeLock: null, syncStatus: 'idle' });
             restored = true;
             return restoredState;
@@ -534,6 +548,8 @@ async function restoreWelcome(client, channelId, expectedOperationId) {
     });
     if (restored) {
         await syncChannel(client, channelId, { force: true, type: 'welcome-expired' }).catch(() => null);
+    } else if (resetDeferred) {
+        await syncChannel(client, channelId, { type: 'welcome-expired' }).catch(() => null);
     }
     return result;
 }
@@ -566,9 +582,18 @@ async function observeVoiceStatus(client, channelOrPayload, statusValue) {
         const recentWrite = recentWrites.get(channel.id);
         if (recentWrite && recentWrite.expiresAt < Date.now()) recentWrites.delete(channel.id);
         const activeWrite = recentWrites.get(channel.id);
-        const isRecentBotWrite = (activeWrite && activeWrite.value === status) || (state.lastBotValue === status && state.lastBotWriteAt && Date.now() - new Date(state.lastBotWriteAt).getTime() < 120000);
+        const history = (recentWriteHistory.get(channel.id) || [])
+            .filter(entry => entry.expiresAt >= Date.now());
+        recentWriteHistory.set(channel.id, history);
+        const echoedWrite = [...history].reverse().find(entry => entry.value === status);
+        const isRecentBotWrite = echoedWrite ||
+            (state.lastBotValue === status && state.lastBotWriteAt && Date.now() - new Date(state.lastBotWriteAt).getTime() < 120000);
         if (isRecentBotWrite) return updateState(state, {
-            currentDiscordValue: status,
+            // An older gateway echo is still a bot event, but must not roll
+            // the observed value back over a newer queued write.
+            currentDiscordValue: echoedWrite && activeWrite?.operationId !== echoedWrite.operationId
+                ? state.currentDiscordValue
+                : status,
             lastObservedAt: new Date(),
             syncStatus: state.syncStatus === 'resetPending' ? 'resetPending' : 'idle',
         });
