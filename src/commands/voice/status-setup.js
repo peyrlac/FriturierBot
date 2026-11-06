@@ -72,7 +72,8 @@ module.exports = async (client, interaction) => {
         for (const entry of gameWeights.split('||')) {
             const [game, weight] = entry.split('=').map(value => value.trim());
             const numericWeight = Number(weight);
-            if (game && Number.isFinite(numericWeight) && numericWeight >= 0) update.gameWeights[normalizeGameId(game)] = numericWeight;
+            const gameId = game === '*' ? '*' : normalizeGameId(game);
+            if (gameId && Number.isFinite(numericWeight) && numericWeight >= 0) update.gameWeights[gameId] = numericWeight;
         }
     }
     if (activityPriority) update.activityPriority = activityPriority;

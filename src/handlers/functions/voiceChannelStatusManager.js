@@ -182,8 +182,13 @@ async function observeCurrentVoiceStatus(client, channel) {
             state.lastBotWriteAt;
         const matchesActiveWelcome = state.welcomeOverlay?.active &&
             state.currentDiscordValue === actualStatus;
+        const isInitialEmptyObservation = actualStatus === null &&
+            state.currentDiscordValue === null &&
+            !state.lastBotWriteAt &&
+            !state.manualLocked;
         const manuallyLocked = Boolean(state.manualLocked) ||
-            (!matchesKnownBotValue && !matchesActiveWelcome && channel.members.size > 0 && hasPreviousObservation);
+            (!matchesKnownBotValue && !matchesActiveWelcome && !isInitialEmptyObservation &&
+                channel.members.size > 0 && hasPreviousObservation);
         await updateState(state, {
             currentDiscordValue: actualStatus,
             lastObservedAt: new Date(),
