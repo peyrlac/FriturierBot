@@ -68,6 +68,7 @@ module.exports = {
                     { name: 'Média', value: 'media-first' },
                     { name: 'Jeu', value: 'game-first' },
                     { name: 'Mixte', value: 'mixed' },
+                    { name: 'Famille configurée', value: 'configured' },
                 ))
                 .addNumberOption(option => option.setName('game-share').setDescription('Part minimale des membres actifs').setMinValue(0).setMaxValue(1).setRequired(false))
                 .addBooleanOption(option => option.setName('reset-on-empty').setDescription('Réinitialiser quand le salon est vide').setRequired(false))
@@ -79,8 +80,18 @@ module.exports = {
                 ))
                 .addStringOption(option => option.setName('default-status').setDescription('Statut de secours sans activité').setRequired(false))
                 .addIntegerOption(option => option.setName('min-update-interval').setDescription('Intervalle minimal entre écritures (secondes)').setMinValue(0).setMaxValue(3600).setRequired(false))
-                .addBooleanOption(option => option.setName('quiet-enabled').setDescription('Activer les plages silencieuses').setRequired(false))
-                .addStringOption(option => option.setName('quiet-ranges').setDescription('Plages HH:MM-HH:MM séparées par ||').setRequired(false))
+                .addIntegerOption(option => option.setName('debounce-seconds').setDescription('Délai de stabilité avant écriture').setMinValue(0).setMaxValue(300).setRequired(false))
+                .addIntegerOption(option => option.setName('empty-reset-delay').setDescription('Délai avant reset d’un salon vide').setMinValue(0).setMaxValue(300).setRequired(false))
+                .addIntegerOption(option => option.setName('stale-after').setDescription('Durée de conservation sans activité (secondes)').setMinValue(0).setMaxValue(86400).setRequired(false))
+                .addStringOption(option => option.setName('aggregation-mode').setDescription('Agrégation des jeux en mode résumé').addChoices(
+                    { name: 'Premier jeu', value: 'first' },
+                    { name: 'Jeux avec compteurs', value: 'count' },
+                    { name: 'Résumé', value: 'summary' },
+                    { name: 'Texte personnalisé', value: 'custom' },
+                ).setRequired(false))
+                .addIntegerOption(option => option.setName('status-rotation').setDescription('Rotation des titres (secondes, 0 désactive)').setMinValue(0).setMaxValue(3600).setRequired(false))
+                .addBooleanOption(option => option.setName('allow-bot-override').setDescription('Autoriser l’automatisation à remplacer un statut manuel').setRequired(false))
+                .addStringOption(option => option.setName('quiet-ranges').setDescription('Plages HH:MM-HH:MM séparées par ||, ou `off`').setRequired(false))
                 .addStringOption(option => option.setName('quiet-timezone').setDescription('Fuseau IANA des plages silencieuses').setRequired(false))
         )
         .addSubcommand(subcommand =>

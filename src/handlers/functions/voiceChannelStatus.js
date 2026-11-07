@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const VoiceChannelStatusConfig = require('../../database/models/voiceChannelStatusConfig');
 const VoiceChannelStatusState = require('../../database/models/voiceChannelStatusState');
-const { resolveRegisteredFamilies } = require('./voiceChannelStatusRegistry');
+const { getActivityFamily, resolveRegisteredFamilies } = require('./voiceChannelStatusRegistry');
 
 const DEFAULT_CONFIG = {
     enabled: false,
@@ -159,7 +159,11 @@ function groupGames(activities, config) {
     }
 
     const activeMembers = new Set(activities
-        .filter(item => item.userId && (item.family === 'game' || item.family === 'media'))
+        .filter(item => item.userId && (
+            (item.family === 'game' && config.activityFamilies.includes('game')) ||
+            (item.family === 'media' && config.activityFamilies.includes('media')) ||
+            (config.activityFamilies.includes(item.family) && Boolean(getActivityFamily(item.family)))
+        ))
         .map(item => item.userId)).size;
     const voiceMembers = config.voiceMemberCount || activeMembers;
     const threshold = config.gameThreshold || DEFAULT_CONFIG.gameThreshold;
@@ -175,25 +179,56 @@ function groupGames(activities, config) {
         .sort((a, b) => b.score - a.score || b.participantCount - a.participantCount || b.weight - a.weight || a.gameId.localeCompare(b.gameId));
 }
 
-function renderMedia(activities) {
+function renderMedia(activities, config = DEFAULT_CONFIG, now = new Date()) {
     const titles = [...new Set(activities.filter(item => item.family === 'media').map(item => item.title).filter(Boolean))];
-    return titles.length ? titles.slice(0, 3).join(' · ').slice(0, 500) : null;
+    if (!titles.length) return null;
+
+    const rotationSeconds = Math.max(0, Number(config.statusRotationSeconds || 0));
+    if (rotationSeconds > 0 && titles.length > 1) {
+        const index = Math.floor(now.getTime() / (rotationSeconds * 1000)) % titles.length;
+        return titles[index].slice(0, 500);
+    }
+
+    return titles.slice(0, 3).join(' · ').slice(0, 500);
 }
 
 function resolveStatus({ activities = [], config = DEFAULT_CONFIG, state = {}, voiceMemberCount = 0, now = new Date() }) {
     const effective = mergeConfig(config, { voiceMemberCount });
     if (!effective.enabled) return { value: null, source: 'disabled', fingerprint: null };
-    if (state.manualLocked) return { value: state.manualValue, source: 'manual', fingerprint: fingerprint(['manual', state.manualValue]) };
+    if (state.manualLocked && !effective.allowBotOverride) {
+        return { value: state.manualValue, source: 'manual', fingerprint: fingerprint(['manual', state.manualValue]) };
+    }
 
     const mediaActivities = effective.mediaEnabled && effective.activityFamilies.includes('media')
         ? activities.filter(activity => activity.family === 'media' && effective.providers.includes(activity.provider))
         : [];
-    const mediaValue = renderMedia(mediaActivities);
+    const mediaValue = renderMedia(mediaActivities, effective, now);
     const games = effective.activityFamilies.includes('game') ? groupGames(activities, effective) : [];
     let gameValue = null;
     if (games.length && effective.gameStatusMode === 'priority') gameValue = `🎮 ${games[0].title}${games[0].participantCount > 1 ? ` · ${games[0].participantCount}` : ''}`.slice(0, 500);
     if (games.length && effective.gameStatusMode === 'generic') gameValue = (effective.genericStatus || '🎮 Multigaming').slice(0, 500);
-    if (games.length && effective.gameStatusMode === 'summary') gameValue = games.slice(0, effective.maxSummaryItems).map(game => game.title).join(' | ').slice(0, 500);
+    if (games.length && effective.gameStatusMode === 'summary') {
+        const aggregationMode = effective.aggregationMode || 'summary';
+        const rotationSeconds = Math.max(0, Number(effective.statusRotationSeconds || 0));
+        const rotatedGame = rotationSeconds > 0 && games.length > 1
+            ? games[Math.floor(now.getTime() / (rotationSeconds * 1000)) % games.length]
+            : null;
+        if (aggregationMode === 'first' || (rotatedGame && aggregationMode !== 'custom')) {
+            const game = rotatedGame || games[0];
+            gameValue = aggregationMode === 'count' && game.participantCount > 1
+                ? `${game.title} · ${game.participantCount}`
+                : game.title;
+        } else if (aggregationMode === 'count') {
+            gameValue = games.slice(0, effective.maxSummaryItems)
+                .map(game => `${game.title}${game.participantCount > 1 ? ` · ${game.participantCount}` : ''}`)
+                .join(' | ');
+        } else if (aggregationMode === 'custom' && effective.genericStatus) {
+            gameValue = effective.genericStatus;
+        } else {
+            gameValue = games.slice(0, effective.maxSummaryItems).map(game => game.title).join(' | ');
+        }
+        gameValue = gameValue.slice(0, 500);
+    }
     const gameMemberCount = new Set(games.flatMap(game => [...game.participants])).size;
     const mediaMemberCount = new Set(mediaActivities.map(activity => activity.userId).filter(Boolean)).size;
 
@@ -207,7 +242,8 @@ function resolveStatus({ activities = [], config = DEFAULT_CONFIG, state = {}, v
 
     let value = null;
     let source = 'empty';
-    if (effective.activityPriority === 'game-first' && gameValue) [value, source] = [gameValue, 'game'];
+    if (effective.activityPriority === 'configured' && registeredDecision) [value, source] = [registeredDecision.value || registeredDecision.status, registeredDecision.family];
+    else if (effective.activityPriority === 'game-first' && gameValue) [value, source] = [gameValue, 'game'];
     else if (effective.activityPriority === 'media-first' && mediaValue) [value, source] = [mediaValue, 'media'];
     else if (effective.activityPriority === 'mixed' && mediaValue && gameValue) [value, source] = [`${gameValue} · ${mediaValue}`, 'mixed'];
     else if (effective.activityPriority === 'dominant' && mediaValue && gameValue) {
@@ -230,7 +266,18 @@ async function getEffectiveConfig(guildId, categoryId, channelId) {
     const patch = doc => {
         if (!doc) return null;
         const overrides = doc.overrides instanceof Map ? Object.fromEntries(doc.overrides) : doc.overrides;
-        return overrides && Object.keys(overrides).length ? overrides : doc;
+        const persistedOptions = { ...doc };
+        for (const key of ['_id', 'guildId', 'scope', 'targetId', 'categoryId', 'channelId', 'overrides', 'createdAt', 'updatedAt', 'createdBy', 'updatedBy']) {
+            delete persistedOptions[key];
+        }
+        // Les configurations créées par le moteur stockent leurs choix dans
+        // `overrides`. Les champs top-level peuvent être des defaults Mongoose
+        // et ne doivent pas réintroduire les defaults de `general` par-dessus
+        // une vocation plus spécifique. Les anciens documents, sans overrides,
+        // restent compatibles grâce au fallback sur leurs champs persistés.
+        return overrides && Object.keys(overrides).length > 0
+            ? { ...overrides }
+            : persistedOptions;
     };
     return mergeConfig(patch(byScope('guild')), patch(byScope('category')), patch(byScope('channel')));
 }

@@ -37,11 +37,25 @@ module.exports = async (client, interaction) => {
         channelId: scope === 'channel' ? targetId : null,
         updatedBy: interaction.user.id,
     };
-    const existingConfig = await VoiceChannelStatusConfig.findOne({ guildId: interaction.guild.id, scope, targetId }).lean();
+    let existingConfig;
+    try {
+        existingConfig = await VoiceChannelStatusConfig.findOne({ guildId: interaction.guild.id, scope, targetId }).lean();
+    } catch (error) {
+        return interaction.editReply({ content: '❌ Impossible de lire la configuration dans MongoDB. Réessaie dans quelques instants.' });
+    }
     const existingOverrides = existingConfig?.overrides instanceof Map
         ? Object.fromEntries(existingConfig.overrides)
         : existingConfig?.overrides || {};
-    const update = { ...existingOverrides };
+    const persistedOptions = existingConfig ? { ...existingConfig } : {};
+    for (const key of ['_id', 'guildId', 'scope', 'targetId', 'categoryId', 'channelId', 'overrides', 'createdAt', 'updatedAt', 'createdBy', 'updatedBy']) {
+        delete persistedOptions[key];
+    }
+    // Quand un ancien document ne possède pas encore d'overrides, recopier ses
+    // options dans le nouveau format évite qu'une modification partielle ne
+    // fasse disparaître silencieusement sa configuration existante.
+    const update = Object.keys(existingOverrides).length > 0
+        ? { ...existingOverrides }
+        : persistedOptions;
     const enabled = interaction.options.getBoolean('enabled');
     const vocation = interaction.options.getString('vocation');
     const gameStatusMode = interaction.options.getString('game-mode');
@@ -57,7 +71,12 @@ module.exports = async (client, interaction) => {
     const shareDenominator = interaction.options.getString('share-denominator');
     const defaultStatus = interaction.options.getString('default-status');
     const minUpdateInterval = interaction.options.getInteger('min-update-interval');
-    const quietEnabled = interaction.options.getBoolean('quiet-enabled');
+    const debounceSeconds = interaction.options.getInteger('debounce-seconds');
+    const emptyResetDelay = interaction.options.getInteger('empty-reset-delay');
+    const staleAfter = interaction.options.getInteger('stale-after');
+    const aggregationMode = interaction.options.getString('aggregation-mode');
+    const statusRotation = interaction.options.getInteger('status-rotation');
+    const allowBotOverride = interaction.options.getBoolean('allow-bot-override');
     const quietRangesInput = interaction.options.getString('quiet-ranges');
     const quietTimezone = interaction.options.getString('quiet-timezone');
     if (enabled !== null) update.enabled = enabled;
@@ -84,9 +103,14 @@ module.exports = async (client, interaction) => {
     if (clearNoActivity !== null) update.clearWhenNoActivity = clearNoActivity;
     if (defaultStatus !== null) update.defaultStatus = defaultStatus;
     if (minUpdateInterval !== null) update.minUpdateIntervalSeconds = minUpdateInterval;
-    if (quietEnabled !== null || quietRangesInput !== null || quietTimezone !== null) {
+    if (debounceSeconds !== null) update.debounceSeconds = debounceSeconds;
+    if (emptyResetDelay !== null) update.emptyResetDelaySeconds = emptyResetDelay;
+    if (staleAfter !== null) update.staleAfterSeconds = staleAfter;
+    if (aggregationMode !== null) update.aggregationMode = aggregationMode;
+    if (statusRotation !== null) update.statusRotationSeconds = statusRotation;
+    if (allowBotOverride !== null) update.allowBotOverride = allowBotOverride;
+    if (quietRangesInput !== null || quietTimezone !== null) {
         const quietHours = { ...(update.quietHours || {}) };
-        if (quietEnabled !== null) quietHours.enabled = quietEnabled;
         if (quietTimezone !== null) {
             try {
                 new Intl.DateTimeFormat('en-GB', { timeZone: quietTimezone }).format();
@@ -96,17 +120,27 @@ module.exports = async (client, interaction) => {
             quietHours.timezone = quietTimezone;
         }
         if (quietRangesInput !== null) {
-            const ranges = parseQuietRanges(quietRangesInput);
-            if (!ranges) return interaction.editReply({ content: '❌ Format invalide. Utilise `HH:MM-HH:MM||HH:MM-HH:MM`.' });
-            quietHours.ranges = ranges;
+            if (quietRangesInput.trim().toLowerCase() === 'off') {
+                quietHours.enabled = false;
+                quietHours.ranges = [];
+            } else {
+                const ranges = parseQuietRanges(quietRangesInput);
+                if (!ranges) return interaction.editReply({ content: '❌ Format invalide. Utilise `HH:MM-HH:MM||HH:MM-HH:MM`.' });
+                quietHours.ranges = ranges;
+                quietHours.enabled = ranges.length > 0;
+            }
         }
         update.quietHours = quietHours;
     }
-    await VoiceChannelStatusConfig.findOneAndUpdate(
-        { guildId: interaction.guild.id, scope, targetId },
-        { $set: { ...metadata, overrides: update }, $setOnInsert: { createdBy: interaction.user.id } },
-        { upsert: true, new: true, setDefaultsOnInsert: false },
-    );
+    try {
+        await VoiceChannelStatusConfig.findOneAndUpdate(
+            { guildId: interaction.guild.id, scope, targetId },
+            { $set: { ...metadata, overrides: update }, $setOnInsert: { createdBy: interaction.user.id } },
+            { upsert: true, new: true, setDefaultsOnInsert: false },
+        );
+    } catch (error) {
+        return interaction.editReply({ content: '❌ Impossible d’enregistrer la configuration dans MongoDB. Réessaie dans quelques instants.' });
+    }
     const targets = scope === 'channel'
         ? [targetId]
         : interaction.guild.channels.cache

@@ -15,7 +15,13 @@ module.exports = async (client, d) => {
     if (typeof client.isFeatureEnabled === 'function' &&
         !(await client.isFeatureEnabled('voiceChannelStatus', channel.guild.id))) return;
 
-    await observeVoiceStatus(client, channelId, payload.status ?? null);
+    try {
+        await observeVoiceStatus(client, channelId, payload.status ?? payload.voice_status ?? payload.voiceStatus ?? null);
+    } catch (error) {
+        // Une observation gateway est best-effort : elle ne doit pas créer de
+        // promesse non gérée ni empêcher le traitement des autres paquets.
+        console.error('[Voice Channel Status] Failed to observe gateway status update:', error);
+    }
 }
 
  
