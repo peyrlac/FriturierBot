@@ -20,6 +20,7 @@ const FEATURE_REGISTRY = {
     welcome: { key: 'welcome', labelKey: 'features.welcome.label', category: 'events', defaultEnabled: true, surfaces: ['event'] },
     antiSpam: { key: 'antiSpam', labelKey: 'features.antiSpam.label', category: 'events', defaultEnabled: true, surfaces: ['event'] },
     voiceCleanup: { key: 'voiceCleanup', labelKey: 'features.voiceCleanup.label', category: 'events', defaultEnabled: true, surfaces: ['event'] },
+    voiceChannelStatus: { key: 'voiceChannelStatus', labelKey: 'features.voiceChannelStatus.label', category: 'events', defaultEnabled: true, surfaces: ['event'] },
     evenement: { key: 'evenement', labelKey: 'features.evenement.label', category: 'commands', defaultEnabled: true, alwaysOn: true, surfaces: ['command'] },
 };
 

@@ -6,6 +6,7 @@ const { model: AnnouncementChannels, clearOldEventsFromDatabase } = require('../
 const { ReminderManager, createManager } = require('../../handlers/functions/eventReminders');
 const statistics = require('../../handlers/functions/statistics');
 const { applyBotStatus, getBotStatus, loadStatusPool, renderStatusActivity } = require('../../handlers/functions/botStatus');
+const { reconcile: reconcileVoiceChannelStatuses } = require('../../handlers/functions/voiceChannelStatusManager');
 
 
 module.exports = async (client) => {
@@ -73,6 +74,13 @@ module.exports = async (client) => {
         logger.error('VOICE', 'Le nettoyage vocal a échoué, le démarrage continue', err);
     }
 
+    try {
+        await reconcileVoiceChannelStatuses(client);
+        logger.success('VOICE_STATUS', 'Synchronisation initiale des statuts vocaux terminée');
+    } catch (err) {
+        logger.error('VOICE_STATUS', 'Échec de la synchronisation initiale des statuts vocaux', err);
+    }
+
     // Debug: run an initial tracking pass immediately to verify the scheduler and fetches
     try {
         logger.info('STATISTICS', 'Synchronisation initiale de l’activité vocale');
@@ -117,7 +125,8 @@ module.exports = async (client) => {
             reminderManager.checkEventReminders(client),
             
             // Track voice activity for each voice channel
-            statisticsManager.trackAllVoiceActivity(client)
+            statisticsManager.trackAllVoiceActivity(client),
+            reconcileVoiceChannelStatuses(client)
         ];
         return Promise.all(promises)
             .then(async results => {

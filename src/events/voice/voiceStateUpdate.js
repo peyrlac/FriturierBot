@@ -2,14 +2,34 @@ const Discord = require('discord.js');
 const Voice = require("../../database/models/voice");
 const VoiceChannels = require("../../database/models/voiceChannels");
 const voiceRoleManager = require("./voiceRoleManager"); // Chemin relatif
+const { handleVoiceStateUpdate } = require('../../handlers/functions/voiceChannelStatusManager');
 
 // Map pour stocker les intervalles par guild
 const cleanupIntervals = new Map();
 
 module.exports = async (client, oldState, newState) => {
-    await voiceRoleManager(client, oldState, newState);
+    const guildId = oldState?.guild?.id || newState?.guild?.id;
+    const featureEnabled = async feature => {
+        if (!guildId || typeof client.isFeatureEnabled !== 'function') return true;
+        return client.isFeatureEnabled(feature, guildId);
+    };
+
+    if (await featureEnabled('voiceChannelStatus')) {
+        try {
+            await handleVoiceStateUpdate(client, oldState, newState);
+        } catch (error) {
+            console.error('[Voice Channel Status] Error handling voice state update:', error);
+        }
+    }
+
+    if (!await featureEnabled('voiceCleanup')) return;
+
     try {
-        const guildId = oldState?.guild?.id || newState?.guild?.id;
+        await voiceRoleManager(client, oldState, newState);
+    } catch (error) {
+        console.error('[Voice Role Manager] Error handling voice state update:', error);
+    }
+    try {
         if (!guildId) return;
 
         const voiceData = await Voice.findOne({ Guild: guildId });
