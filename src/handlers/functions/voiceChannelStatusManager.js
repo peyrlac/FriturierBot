@@ -15,6 +15,7 @@ const welcomeBatches = new Map();
 const recentWrites = new Map();
 const recentWriteHistory = new Map();
 const pendingWrites = new Map();
+const emptyResetTimers = new Map();
 
 function operationId() {
     return crypto.randomUUID();
@@ -36,6 +37,26 @@ function clearStabilityCheck(channelId) {
     const timer = stabilityTimers.get(channelId);
     if (timer) clearTimeout(timer);
     stabilityTimers.delete(channelId);
+}
+
+function clearEmptyResetTimer(channelId) {
+    const scheduled = emptyResetTimers.get(channelId);
+    if (scheduled) clearTimeout(scheduled.timer);
+    emptyResetTimers.delete(channelId);
+}
+
+function scheduleEmptyReset(client, channel, sessionId, deadline) {
+    const channelId = channel.id;
+    const deadlineMs = new Date(deadline).getTime();
+    const current = emptyResetTimers.get(channelId);
+    if (current && current.sessionId === sessionId && current.deadlineMs === deadlineMs) return;
+    clearEmptyResetTimer(channelId);
+    const timer = setTimeout(() => {
+        if (emptyResetTimers.get(channelId)?.timer !== timer) return;
+        emptyResetTimers.delete(channelId);
+        performEmptyReset(client, channelId, sessionId).catch(() => null);
+    }, Math.max(0, deadlineMs - Date.now()));
+    emptyResetTimers.set(channelId, { timer, sessionId, deadlineMs });
 }
 
 function scheduleRotationCheck(client, channelId, seconds) {
@@ -156,9 +177,14 @@ async function syncChannel(client, channelId, options = {}) {
             if (channel.members.size > 0) {
                 // A member returned during the grace period: cancel only the
                 // empty-session reset, never a separately requested reset.
+                clearEmptyResetTimer(channel.id);
                 return updateState(pendingState, { emptySessionId: null, emptyResetAt: null, syncStatus: 'idle', nextRetryAt: null });
             }
-            if (retryAt && retryAt > Date.now()) return pendingState;
+            if (retryAt && retryAt > Date.now()) {
+                const persistedDeadline = pendingState.emptyResetAt && new Date(pendingState.emptyResetAt).getTime();
+                scheduleEmptyReset(client, channel, pendingState.emptySessionId, new Date(Math.max(retryAt, persistedDeadline || 0)));
+                return pendingState;
+            }
             const pendingConfig = await getEffectiveConfig(channel.guild.id, channel.parentId, channel.id);
             return resetEmptyChannel(client, channel, pendingConfig, pendingState);
         }
@@ -376,6 +402,69 @@ function scheduleWelcomeRestore(client, channelId, operationId, expiresAt) {
     timers.set(key, timer);
 }
 
+async function performEmptyReset(client, channelId, sessionId) {
+    return withQueue(channelId, async () => {
+        const channel = client.channels.cache.get(channelId);
+        if (!channel?.guild) return null;
+        const refreshed = await getState(channel.guild.id, channel.id);
+        if (refreshed.emptySessionId !== sessionId || refreshed.resetRequestPending) return refreshed;
+        if (channel.members.size > 0) {
+            clearEmptyResetTimer(channel.id);
+            return updateState(refreshed, { emptySessionId: null, emptyResetAt: null, syncStatus: 'idle', nextRetryAt: null });
+        }
+        const lock = await acquireWriteLock(channel.guild.id, channel.id, 'reset-empty');
+        if (!lock) {
+            const retryAt = new Date(Date.now() + 5000);
+            const pending = await updateState(refreshed, { syncStatus: 'resetPending', nextRetryAt: retryAt });
+            scheduleEmptyReset(client, channel, sessionId, retryAt);
+            return pending;
+        }
+        const stateWithLock = lock.state;
+        const id = lock.id;
+        try {
+            await writeVoiceStatusTracked(client, channel, null, id);
+            clearEmptyResetTimer(channel.id);
+            return updateState(stateWithLock, {
+                currentDiscordValue: null,
+                lastBotValue: null,
+                lastResolvedValue: null,
+                source: 'empty',
+                manualLocked: false,
+                manualValue: null,
+                manualObservedAt: null,
+                lastActivityFingerprint: null,
+                pendingCandidateActive: false,
+                pendingCandidateValue: null,
+                pendingCandidateSource: null,
+                pendingCandidateFingerprint: null,
+                pendingCandidateSince: null,
+                emptySessionId: null,
+                emptyResetAt: null,
+                resetRequestPending: false,
+                syncStatus: 'idle',
+                writeLock: null,
+                welcomeOverlay: { active: false },
+                lastBotWriteId: id,
+                lastBotWriteAt: new Date(),
+                lastWriteAt: new Date(),
+                lastObservedAt: new Date(),
+                failureCount: 0,
+                nextRetryAt: null,
+            });
+        } catch (error) {
+            const retryAt = new Date(Date.now() + Math.min(300000, 1000 * 2 ** Math.min(stateWithLock.failureCount || 0, 8)));
+            await updateState(stateWithLock, {
+                syncStatus: 'resetPending',
+                failureCount: (stateWithLock.failureCount || 0) + 1,
+                nextRetryAt: retryAt,
+                writeLock: null,
+            });
+            scheduleEmptyReset(client, channel, sessionId, retryAt);
+            throw error;
+        }
+    });
+}
+
 async function resetEmptyChannel(client, channel, config, state) {
     if (!config.resetOnEmpty) return state;
     if (state.source === 'empty' && !state.currentDiscordValue && !state.manualLocked && !state.welcomeOverlay?.active && !state.emptySessionId) return state;
@@ -383,7 +472,7 @@ async function resetEmptyChannel(client, channel, config, state) {
     const deadline = state.emptyResetAt
         ? new Date(state.emptyResetAt)
         : new Date(Date.now() + Math.max(0, Number(config.emptyResetDelaySeconds || 0) * 1000));
-    await updateState(state, {
+    const updatedState = await updateState(state, {
         emptySessionId: sessionId,
         emptyResetAt: deadline,
         pendingCandidateActive: false,
@@ -393,55 +482,8 @@ async function resetEmptyChannel(client, channel, config, state) {
         pendingCandidateSince: null,
         syncStatus: 'resetPending',
     });
-    const delay = Math.max(0, deadline.getTime() - Date.now());
-    await new Promise(resolve => setTimeout(resolve, delay));
-    const refreshed = await getState(channel.guild.id, channel.id);
-    if (refreshed.emptySessionId !== sessionId) return refreshed;
-    if (channel.members.size > 0) {
-        return updateState(refreshed, { emptySessionId: null, emptyResetAt: null, syncStatus: 'idle', nextRetryAt: null });
-    }
-    const lock = await acquireWriteLock(channel.guild.id, channel.id, 'reset-empty');
-    if (!lock) return refreshed;
-    const stateWithLock = lock.state;
-    const id = lock.id;
-    try {
-        await writeVoiceStatusTracked(client, channel, null, id);
-        return updateState(stateWithLock, {
-            currentDiscordValue: null,
-            lastBotValue: null,
-            lastResolvedValue: null,
-            source: 'empty',
-            manualLocked: false,
-            manualValue: null,
-            manualObservedAt: null,
-            lastActivityFingerprint: null,
-            pendingCandidateActive: false,
-            pendingCandidateValue: null,
-            pendingCandidateSource: null,
-            pendingCandidateFingerprint: null,
-            pendingCandidateSince: null,
-            emptySessionId: null,
-            emptyResetAt: null,
-            resetRequestPending: false,
-            syncStatus: 'idle',
-            writeLock: null,
-            welcomeOverlay: { active: false },
-            lastBotWriteId: id,
-            lastBotWriteAt: new Date(),
-            lastWriteAt: new Date(),
-            lastObservedAt: new Date(),
-            failureCount: 0,
-            nextRetryAt: null,
-        });
-    } catch (error) {
-        await updateState(stateWithLock, {
-            syncStatus: 'resetPending',
-            failureCount: (stateWithLock.failureCount || 0) + 1,
-            nextRetryAt: new Date(Date.now() + Math.min(300000, 1000 * 2 ** Math.min(stateWithLock.failureCount || 0, 8))),
-            writeLock: null,
-        });
-        throw error;
-    }
+    scheduleEmptyReset(client, channel, sessionId, deadline);
+    return updatedState;
 }
 
 async function runWelcome(client, channel, users, options = {}) {
@@ -541,11 +583,29 @@ async function forceReset(client, channel) {
         // Une autre écriture possède déjà le verrou. Laisser la
         // réconciliation reprendre la demande plutôt que de faire croire à la
         // commande que le reset a été exécuté.
-        if (!lock) return null;
+        if (!lock) {
+            clearEmptyResetTimer(channel.id);
+            const retryAt = new Date(Date.now() + 5000);
+            return VoiceChannelStatusState.findOneAndUpdate(
+                { guildId: channel.guild.id, channelId: channel.id },
+                {
+                    $set: {
+                        resetRequestPending: true,
+                        syncStatus: 'resetPending',
+                        emptySessionId: null,
+                        emptyResetAt: null,
+                        nextRetryAt: retryAt,
+                    },
+                    $setOnInsert: { guildId: channel.guild.id, channelId: channel.id },
+                },
+                { upsert: true, new: true, setDefaultsOnInsert: true },
+            );
+        }
         const state = lock.state;
         const id = lock.id;
         try {
             await writeVoiceStatusTracked(client, channel, null, id);
+            clearEmptyResetTimer(channel.id);
             return updateState(state, {
                 currentDiscordValue: null,
                 lastBotValue: null,

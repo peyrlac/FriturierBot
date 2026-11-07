@@ -9,6 +9,7 @@ module.exports = async (client, interaction) => {
     try {
         const result = await forceReset(client, channel);
         if (!result) return interaction.editReply({ content: `⏳ Une autre synchronisation est déjà en cours pour ${channel}. Le reset sera repris automatiquement.` });
+        if (result.resetRequestPending) return interaction.editReply({ content: `⏳ Une autre synchronisation est déjà en cours pour ${channel}. La demande de reset est enregistrée et sera retentée automatiquement.` });
         return interaction.editReply({ content: `✅ Statut et verrou réinitialisés pour ${channel}.` });
     } catch (error) {
         // forceReset conserve la demande en base et la réconciliation la
