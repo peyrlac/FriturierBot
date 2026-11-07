@@ -174,6 +174,11 @@ async function syncChannel(client, channelId, options = {}) {
     if (pendingState.resetRequestPending || pendingState.syncStatus === 'resetPending') {
         const retryAt = pendingState.nextRetryAt && new Date(pendingState.nextRetryAt).getTime();
         if (pendingState.emptySessionId && !pendingState.resetRequestPending) {
+            const pendingConfig = await getEffectiveConfig(channel.guild.id, channel.parentId, channel.id);
+            if (!pendingConfig.resetOnEmpty) {
+                clearEmptyResetTimer(channel.id);
+                return updateState(pendingState, { emptySessionId: null, emptyResetAt: null, syncStatus: 'idle', nextRetryAt: null });
+            }
             if (channel.members.size > 0) {
                 // A member returned during the grace period: cancel only the
                 // empty-session reset, never a separately requested reset.
@@ -185,7 +190,6 @@ async function syncChannel(client, channelId, options = {}) {
                 scheduleEmptyReset(client, channel, pendingState.emptySessionId, new Date(Math.max(retryAt, persistedDeadline || 0)));
                 return pendingState;
             }
-            const pendingConfig = await getEffectiveConfig(channel.guild.id, channel.parentId, channel.id);
             return resetEmptyChannel(client, channel, pendingConfig, pendingState);
         }
         if (!retryAt || retryAt <= Date.now()) return forceReset(client, channel);
@@ -408,6 +412,16 @@ async function performEmptyReset(client, channelId, sessionId) {
         if (!channel?.guild) return null;
         const refreshed = await getState(channel.guild.id, channel.id);
         if (refreshed.emptySessionId !== sessionId || refreshed.resetRequestPending) return refreshed;
+        const config = await getEffectiveConfig(channel.guild.id, channel.parentId, channel.id);
+        if (!config.resetOnEmpty) {
+            clearEmptyResetTimer(channel.id);
+            return updateState(refreshed, {
+                emptySessionId: null,
+                emptyResetAt: null,
+                syncStatus: 'idle',
+                nextRetryAt: null,
+            });
+        }
         if (channel.members.size > 0) {
             clearEmptyResetTimer(channel.id);
             return updateState(refreshed, { emptySessionId: null, emptyResetAt: null, syncStatus: 'idle', nextRetryAt: null });
